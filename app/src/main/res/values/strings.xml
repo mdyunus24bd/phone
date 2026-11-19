@@ -1,0 +1,19 @@
+<resources>
+    <string name="app_name">VoxLine</string>
+    <string name="nav_keypad">Keypad</string>
+    <string name="nav_recents">Recents</string>
+    <string name="nav_contacts">Contacts</string>
+    <string name="nav_insights">Control</string>
+    <string name="default_dialer_prompt_title">Set VoxLine as Default Phone App</string>
+    <string name="default_dialer_prompt_body">Handle SIM calls, spam screening, and live quality telemetry seamlessly.</string>
+    <string name="default_dialer_active">Default Phone Active</string>
+    <string name="network_sim">SIM</string>
+    <string name="call_recording_active">Recording Active</string>
+    <string name="encryption_badge">AES-256-GCM • Keystore</string>
+    <string name="recording_channel_name">Call Recording</string>
+    <string name="recording_channel_description">Shows ongoing status while VoxLine records a call in the background.</string>
+    <string name="recording_notification_title">Background Call Recording</string>
+    <string name="recording_permission_title">Microphone Permission Required</string>
+    <string name="recording_permission_rationale">VoxLine needs microphone access to record call audio using Android MediaRecorder and save it in the app\'s internal storage.</string>
+    <string name="recording_permission_settings_body">Microphone permission was permanently denied. Enable Microphone access in App Settings to record calls.</string>
+</resources>

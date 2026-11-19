@@ -1,0 +1,8 @@
+{
+  "name": "Phone",
+  "description": "SIM and phone dialer with call recording, call forwarding, cross-device call log sync, real-time call quality analytics, spam protection, and encrypted privacy controls.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
