@@ -16,4 +16,6 @@
     <string name="recording_permission_title">Microphone Permission Required</string>
     <string name="recording_permission_rationale">VoxLine needs microphone access to record call audio using Android MediaRecorder and save it in the app\'s internal storage.</string>
     <string name="recording_permission_settings_body">Microphone permission was permanently denied. Enable Microphone access in App Settings to record calls.</string>
+    <string name="accessibility_call_audio_label">VoxLine Call Audio Helper</string>
+    <string name="accessibility_call_audio_description">Allows VoxLine to capture two-way call audio on Android 10+ instead of Android silencing recordings during active phone calls. Does not read screen content.</string>
 </resources>

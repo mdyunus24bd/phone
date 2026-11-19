@@ -46,18 +46,24 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Message
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
+import androidx.compose.material.icons.filled.AddIcCall
 import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.CallEnd
+import androidx.compose.material.icons.filled.CallMerge
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Dialpad
 import androidx.compose.material.icons.filled.FiberManualRecord
 import androidx.compose.material.icons.filled.GraphicEq
+import androidx.compose.material.icons.filled.Groups
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Public
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.SwapCalls
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -102,11 +108,16 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.R
+import com.example.data.local.ContactEntity
+import com.example.telecom.CallRecordingAccessibilityService
 import com.example.telecom.PhoneCountryResolver
 import com.example.telecom.SpamRiskLevel
+import com.example.ui.components.AddConferenceCallerDialog
+import com.example.ui.components.ConferenceParticipantsDialog
 import com.example.ui.components.ContactAvatar
 import com.example.ui.components.EncryptionChip
 import com.example.ui.components.MetricPill
@@ -128,13 +139,20 @@ import com.example.viewmodel.ActiveCallSession
 @Composable
 fun ActiveCallOverlay(
     session: ActiveCallSession,
+    contacts: List<ContactEntity> = emptyList(),
     quickReplyTemplates: List<String>,
     onToggleMute: () -> Unit,
     onToggleSpeaker: () -> Unit,
     onToggleHold: () -> Unit,
     onToggleRecord: (hasAudioPermission: Boolean) -> Unit,
+    onRetryRecord: () -> Unit = {},
     onRecordPermissionDenied: (permanentlyDenied: Boolean) -> Unit,
     onSendDtmf: (Char) -> Unit,
+    onAddCallToConference: (String) -> Unit = {},
+    onMergeCalls: () -> Unit = {},
+    onSwapCalls: () -> Unit = {},
+    onSeparateParticipant: (String) -> Unit = {},
+    onDisconnectParticipant: (String) -> Unit = {},
     onAnswerCall: () -> Unit,
     onDeclineCall: () -> Unit,
     onDeclineWithQuickReply: (String) -> Unit,
@@ -148,6 +166,8 @@ fun ActiveCallOverlay(
     var showDtmfPad by remember { mutableStateOf(false) }
     var showQuickReplySheet by remember { mutableStateOf(false) }
     var customQuickReply by remember { mutableStateOf("") }
+    var showAddCallerDialog by remember { mutableStateOf(false) }
+    var showConferenceParticipantsDialog by remember { mutableStateOf(false) }
 
     var hasMicPermission by remember {
         mutableStateOf(
@@ -160,8 +180,11 @@ fun ActiveCallOverlay(
     var hasRequestedMicOnce by remember { mutableStateOf(false) }
     var showMicRationaleDialog by remember { mutableStateOf(false) }
     var showMicSettingsDialog by remember { mutableStateOf(false) }
+    var isAudioHelperEnabled by remember {
+        mutableStateOf(CallRecordingAccessibilityService.isServiceEnabled(context))
+    }
 
-    // Refresh microphone permission state if user returns from App Settings
+    // Refresh microphone permission & Call Audio Helper state when returning from Android Settings
     DisposableEffect(lifecycleOwner, context) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
@@ -169,6 +192,12 @@ fun ActiveCallOverlay(
                     context,
                     Manifest.permission.RECORD_AUDIO
                 ) == PackageManager.PERMISSION_GRANTED
+                val wasHelperEnabled = isAudioHelperEnabled
+                val nowHelperEnabled = CallRecordingAccessibilityService.isServiceEnabled(context)
+                isAudioHelperEnabled = nowHelperEnabled
+                if (!wasHelperEnabled && nowHelperEnabled && session.isRecording && session.isRecordingSilenced) {
+                    onRetryRecord()
+                }
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -337,50 +366,102 @@ fun ActiveCallOverlay(
                             .clip(CircleShape)
                             .background(lineAccent.copy(alpha = if (session.isOnHold) 0.08f else haloAlpha))
                     )
-                    ContactAvatar(
-                        name = session.displayName.ifBlank { session.address },
-                        colorIndex = 0,
-                        photoUri = session.photoUri,
-                        size = 70.dp
-                    )
+                    if (session.isConference) {
+                        Surface(
+                            shape = CircleShape,
+                            color = SimAccentEmerald.copy(alpha = 0.25f),
+                            border = BorderStroke(1.5.dp, SimAccentEmerald),
+                            modifier = Modifier.size(70.dp)
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Icon(
+                                    imageVector = Icons.Filled.Groups,
+                                    contentDescription = "Conference Call",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(36.dp)
+                                )
+                            }
+                        }
+                    } else {
+                        ContactAvatar(
+                            name = session.displayName.ifBlank { session.address },
+                            colorIndex = 0,
+                            photoUri = session.photoUri,
+                            size = 70.dp
+                        )
+                    }
                 }
 
                 Text(
-                    text = session.displayName.ifBlank { session.address },
+                    text = if (session.isConference) {
+                        "Conference Call"
+                    } else {
+                        session.displayName.ifBlank { session.address }
+                    },
                     style = MaterialTheme.typography.displaySmall,
                     color = Color.White,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
 
-                if (session.displayName.isNotBlank()) {
-                    Text(
-                        text = session.address,
-                        style = MonoMetricStyle,
-                        color = Color(0xFF94A3B8)
-                    )
-                }
-
-                val callingCountry = remember(session.address) {
-                    PhoneCountryResolver.resolveCountryName(context, session.address)
-                }
-                if (callingCountry.isNotBlank()) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(5.dp),
-                        modifier = Modifier.testTag("active_call_country")
+                if (session.isConference) {
+                    Surface(
+                        shape = RoundedCornerShape(999.dp),
+                        color = SimAccentEmerald.copy(alpha = 0.20f),
+                        border = BorderStroke(1.dp, SimAccentEmerald.copy(alpha = 0.6f)),
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(999.dp))
+                            .clickable { showConferenceParticipantsDialog = true }
+                            .testTag("manage_conference_participants_button")
                     ) {
-                        Icon(
-                            imageVector = Icons.Filled.Public,
-                            contentDescription = "Calling country",
-                            tint = lineAccent,
-                            modifier = Modifier.size(14.dp)
-                        )
+                        Row(
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.Groups,
+                                contentDescription = "Manage conference participants",
+                                tint = SimAccentEmerald,
+                                modifier = Modifier.size(15.dp)
+                            )
+                            Text(
+                                text = "Manage ${session.conferenceParticipants.size.coerceAtLeast(2)} Participants",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = Color.White
+                            )
+                        }
+                    }
+                } else {
+                    if (session.displayName.isNotBlank()) {
                         Text(
-                            text = callingCountry,
-                            style = MaterialTheme.typography.labelLarge,
-                            color = Color(0xFFCBD5E1)
+                            text = session.address,
+                            style = MonoMetricStyle,
+                            color = Color(0xFF94A3B8)
                         )
+                    }
+
+                    val callingCountry = remember(session.address) {
+                        PhoneCountryResolver.resolveCountryName(context, session.address)
+                    }
+                    if (callingCountry.isNotBlank()) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(5.dp),
+                            modifier = Modifier.testTag("active_call_country")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.Public,
+                                contentDescription = "Calling country",
+                                tint = lineAccent,
+                                modifier = Modifier.size(14.dp)
+                            )
+                            Text(
+                                text = callingCountry,
+                                style = MaterialTheme.typography.labelLarge,
+                                color = Color(0xFFCBD5E1)
+                            )
+                        }
                     }
                 }
 
@@ -438,6 +519,77 @@ fun ActiveCallOverlay(
                     }
                     session.spamAssessment?.takeIf { it.level != SpamRiskLevel.SAFE }?.let { spam ->
                         SpamRiskChip(level = spam.level, score = spam.score)
+                    }
+                }
+            }
+
+            // Secondary / Held Call Banner with instant Swap & Merge Conference buttons
+            session.secondaryCall?.let { secondary ->
+                Surface(
+                    shape = RoundedCornerShape(18.dp),
+                    color = Color(0xCC132238),
+                    border = BorderStroke(1.dp, AccentSkyBlue.copy(alpha = 0.45f)),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("secondary_held_call_banner")
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 14.dp, vertical = 10.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = if (secondary.isHolding) "ON HOLD" else "SECOND CALL",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = QualityFair
+                            )
+                            Text(
+                                text = secondary.displayName.ifBlank { secondary.handle },
+                                style = MaterialTheme.typography.titleSmall,
+                                color = Color.White,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            if (session.canSwapCalls) {
+                                FilledTonalButton(
+                                    onClick = {
+                                        haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                        onSwapCalls()
+                                    },
+                                    colors = ButtonDefaults.filledTonalButtonColors(
+                                        containerColor = AccentSkyBlue.copy(alpha = 0.24f),
+                                        contentColor = Color.White
+                                    ),
+                                    modifier = Modifier.testTag("banner_swap_calls_button")
+                                ) {
+                                    Icon(Icons.Filled.SwapCalls, contentDescription = "Swap calls", modifier = Modifier.size(16.dp))
+                                    Spacer(Modifier.width(4.dp))
+                                    Text("Swap", style = MaterialTheme.typography.labelMedium)
+                                }
+                            }
+                            if (session.canMergeCalls) {
+                                Button(
+                                    onClick = {
+                                        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                        onMergeCalls()
+                                    },
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = SimAccentEmerald,
+                                        contentColor = Color.White
+                                    ),
+                                    modifier = Modifier.testTag("banner_merge_calls_button")
+                                ) {
+                                    Icon(Icons.Filled.CallMerge, contentDescription = "Merge conference", modifier = Modifier.size(16.dp))
+                                    Spacer(Modifier.width(4.dp))
+                                    Text("Merge", style = MaterialTheme.typography.labelMedium)
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -629,13 +781,23 @@ fun ActiveCallOverlay(
                         )
                     }
 
-                    // Dedicated Call Recording Toggle Strip (MediaRecorder -> App Internal Storage)
+                    // Dedicated Call Recording Toggle Strip (AudioRecord + Two-Way AGC -> App Internal Storage)
+                    val recordingCardColor = when {
+                        session.isRecording && session.isRecordingSilenced -> QualityFair.copy(alpha = 0.16f)
+                        session.isRecording -> CallEndRed.copy(alpha = 0.16f)
+                        else -> Color(0xFF162235)
+                    }
+                    val recordingBorderColor = when {
+                        session.isRecording && session.isRecordingSilenced -> QualityFair.copy(alpha = 0.7f)
+                        session.isRecording -> CallEndRed.copy(alpha = 0.6f)
+                        else -> Color(0xFF283A56)
+                    }
                     Surface(
                         shape = RoundedCornerShape(16.dp),
-                        color = if (session.isRecording) CallEndRed.copy(alpha = 0.16f) else Color(0xFF162235),
+                        color = recordingCardColor,
                         border = BorderStroke(
                             width = if (session.isRecording) 1.5.dp else 1.dp,
-                            color = if (session.isRecording) CallEndRed.copy(alpha = 0.6f) else Color(0xFF283A56)
+                            color = recordingBorderColor
                         ),
                         modifier = Modifier
                             .fillMaxWidth()
@@ -646,76 +808,211 @@ fun ActiveCallOverlay(
                             }
                             .testTag("active_call_recording_banner")
                     ) {
-                        Row(
+                        Column(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .padding(horizontal = 14.dp, vertical = 10.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
                             Row(
-                                modifier = Modifier.weight(1f),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
                             ) {
-                                if (session.isRecordingBusy) {
-                                    CircularProgressIndicator(
-                                        color = CallEndRed,
-                                        strokeWidth = 2.dp,
-                                        modifier = Modifier.size(16.dp)
-                                    )
-                                } else {
-                                    Icon(
-                                        imageVector = Icons.Filled.FiberManualRecord,
-                                        contentDescription = if (session.isRecording) "Recording active" else "Call recording off",
-                                        tint = if (session.isRecording) CallEndRed else Color(0xFF94A3B8),
-                                        modifier = Modifier
-                                            .size(14.dp)
-                                            .alpha(if (session.isRecording) recAlpha else 1f)
-                                    )
+                                Row(
+                                    modifier = Modifier.weight(1f),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                ) {
+                                    if (session.isRecordingBusy) {
+                                        CircularProgressIndicator(
+                                            color = CallEndRed,
+                                            strokeWidth = 2.dp,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                    } else if (session.isRecording && session.isRecordingSilenced) {
+                                        Icon(
+                                            imageVector = Icons.Filled.Warning,
+                                            contentDescription = "Audio silenced by Android",
+                                            tint = QualityFair,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                    } else {
+                                        Icon(
+                                            imageVector = Icons.Filled.FiberManualRecord,
+                                            contentDescription = if (session.isRecording) "Recording active" else "Call recording off",
+                                            tint = if (session.isRecording) CallEndRed else Color(0xFF94A3B8),
+                                            modifier = Modifier
+                                                .size(14.dp)
+                                                .alpha(if (session.isRecording) recAlpha else 1f)
+                                        )
+                                    }
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = when {
+                                                session.isRecordingBusy && session.isRecording -> "Saving recording..."
+                                                session.isRecordingBusy -> "Probing call audio source..."
+                                                session.isRecording && session.isRecordingSilenced -> "Audio Silenced • ${formatDuration(session.recordingSec)}"
+                                                session.isRecording -> "${if (session.isAutoRecording) "Auto" else "Call"} Recording • ${formatDuration(session.recordingSec)}"
+                                                else -> "Record Call"
+                                            },
+                                            style = MaterialTheme.typography.labelLarge,
+                                            color = Color.White,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        Text(
+                                            text = when {
+                                                session.isRecording && session.isRecordingSilenced ->
+                                                    "Android OS silenced ${session.recordingAudioSource.ifBlank { "input" }} during call"
+                                                session.isRecording ->
+                                                    "${session.recordingAudioSource.ifBlank { "VOICE_RECOG" }} • Two-Way AGC • Internal Storage"
+                                                else ->
+                                                    "Saves .m4a audio in App Internal Storage"
+                                            },
+                                            style = MonoMetricStyle,
+                                            color = if (session.isRecording && session.isRecordingSilenced) {
+                                                QualityFair
+                                            } else {
+                                                Color(0xFFCBD5E1)
+                                            },
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+
+                                    // Real-time 4-bar audio signal level meter while actively capturing
+                                    if (session.isRecording && !session.isRecordingBusy && !session.isRecordingSilenced) {
+                                        Row(
+                                            horizontalArrangement = Arrangement.spacedBy(2.dp),
+                                            verticalAlignment = Alignment.Bottom,
+                                            modifier = Modifier
+                                                .height(18.dp)
+                                                .padding(end = 4.dp)
+                                        ) {
+                                            val level = session.recordingAudioLevel.coerceIn(0f, 1f)
+                                            val barHeights = listOf(0.28f, 0.55f, 0.80f, 1.0f)
+                                            barHeights.forEach { threshold ->
+                                                val lit = level >= threshold * 0.35f
+                                                val barDp = (5f + 13f * (if (lit) (level / threshold).coerceIn(0.35f, 1f) else 0.2f)).dp
+                                                Box(
+                                                    modifier = Modifier
+                                                        .width(3.dp)
+                                                        .height(barDp)
+                                                        .clip(RoundedCornerShape(2.dp))
+                                                        .background(
+                                                            if (lit) SimAccentEmerald else Color(0xFF475569)
+                                                        )
+                                                )
+                                            }
+                                        }
+                                    }
                                 }
-                                Column {
-                                    Text(
-                                        text = when {
-                                            session.isRecordingBusy && session.isRecording -> "Saving recording..."
-                                            session.isRecordingBusy -> "Starting MediaRecorder..."
-                                            session.isRecording -> "${if (session.isAutoRecording) "Auto" else "Call"} Recording • ${formatDuration(session.recordingSec)}"
-                                            else -> "Record Call"
-                                        },
-                                        style = MaterialTheme.typography.labelLarge,
-                                        color = Color.White,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                    Text(
-                                        text = if (session.isRecording) {
-                                            "MediaRecorder (${session.recordingAudioSource.ifBlank { "VOICE_COMM" }}) • App Internal Storage"
-                                        } else {
-                                            "Saves .m4a audio in App Internal Storage"
-                                        },
-                                        style = MonoMetricStyle,
-                                        color = Color(0xFFCBD5E1),
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                }
+                                Switch(
+                                    checked = session.isRecording,
+                                    onCheckedChange = {
+                                        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                        handleRecordToggleClick()
+                                    },
+                                    enabled = !session.isRecordingBusy,
+                                    colors = SwitchDefaults.colors(
+                                        checkedThumbColor = Color.White,
+                                        checkedTrackColor = if (session.isRecordingSilenced) QualityFair else CallEndRed,
+                                        uncheckedThumbColor = Color(0xFFCBD5E1),
+                                        uncheckedTrackColor = Color(0xFF23344D),
+                                        uncheckedBorderColor = Color(0xFF3A4E6E)
+                                    ),
+                                    modifier = Modifier.testTag("call_record_toggle_switch")
+                                )
                             }
-                            Switch(
-                                checked = session.isRecording,
-                                onCheckedChange = {
-                                    haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                                    handleRecordToggleClick()
-                                },
-                                enabled = !session.isRecordingBusy,
-                                colors = SwitchDefaults.colors(
-                                    checkedThumbColor = Color.White,
-                                    checkedTrackColor = CallEndRed,
-                                    uncheckedThumbColor = Color(0xFFCBD5E1),
-                                    uncheckedTrackColor = Color(0xFF23344D),
-                                    uncheckedBorderColor = Color(0xFF3A4E6E)
-                                ),
-                                modifier = Modifier.testTag("call_record_toggle_switch")
-                            )
+
+                            // Actionable recovery bar if Android 10+ OS is silencing audio input during the call
+                            if (session.isRecording && !session.isRecordingBusy && session.isRecordingSilenced) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    if (!isAudioHelperEnabled) {
+                                        Surface(
+                                            onClick = {
+                                                CallRecordingAccessibilityService.openAccessibilitySettings(context)
+                                            },
+                                            shape = RoundedCornerShape(10.dp),
+                                            color = QualityFair.copy(alpha = 0.25f),
+                                            border = BorderStroke(1.dp, QualityFair.copy(alpha = 0.7f)),
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .testTag("call_enable_audio_helper_button")
+                                        ) {
+                                            Text(
+                                                text = "Enable Audio Helper",
+                                                style = MaterialTheme.typography.labelMedium,
+                                                color = Color.White,
+                                                textAlign = TextAlign.Center,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp)
+                                            )
+                                        }
+                                    }
+                                    if (!session.isSpeakerOn) {
+                                        Surface(
+                                            onClick = {
+                                                haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                                onToggleSpeaker()
+                                            },
+                                            shape = RoundedCornerShape(10.dp),
+                                            color = AccentSkyBlue.copy(alpha = 0.22f),
+                                            border = BorderStroke(1.dp, AccentSkyBlue.copy(alpha = 0.6f)),
+                                            modifier = Modifier.testTag("call_silenced_speaker_button")
+                                        ) {
+                                            Text(
+                                                text = "Speaker",
+                                                style = MaterialTheme.typography.labelMedium,
+                                                color = Color.White,
+                                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp)
+                                            )
+                                        }
+                                    }
+                                    Surface(
+                                        onClick = {
+                                            haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                            onRetryRecord()
+                                        },
+                                        shape = RoundedCornerShape(10.dp),
+                                        color = Color(0xFF23344D),
+                                        border = BorderStroke(1.dp, Color(0xFF475569)),
+                                        modifier = Modifier.testTag("call_retry_record_button")
+                                    ) {
+                                        Row(
+                                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Filled.Refresh,
+                                                contentDescription = "Retry capture",
+                                                tint = Color.White,
+                                                modifier = Modifier.size(14.dp)
+                                            )
+                                            Text(
+                                                text = "Retry",
+                                                style = MaterialTheme.typography.labelMedium,
+                                                color = Color.White
+                                            )
+                                        }
+                                    }
+                                }
+                            } else if (session.isRecording && !session.isRecordingBusy &&
+                                session.recordingAudioSource != "VOICE_CALL" && !session.isSpeakerOn
+                            ) {
+                                Text(
+                                    text = "Tip: Turn on Speaker for louder far-end voice pickup",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Color(0xFF94A3B8)
+                                )
+                            }
                         }
                     }
 
@@ -748,6 +1045,69 @@ fun ActiveCallOverlay(
                             },
                             modifier = Modifier.weight(1f)
                         )
+                    }
+
+                    // Conference Call Controls Row: Add Call, Merge / Manage Participants, Swap
+                    if (!session.isRinging) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            PrimaryCallControlTile(
+                                icon = Icons.Filled.AddIcCall,
+                                label = "Add Call",
+                                active = false,
+                                activeColor = SimAccentEmerald,
+                                tag = "call_add_caller_button",
+                                onClick = {
+                                    haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                    showAddCallerDialog = true
+                                },
+                                modifier = Modifier.weight(1f)
+                            )
+                            if (session.isConference && !session.canMergeCalls) {
+                                PrimaryCallControlTile(
+                                    icon = Icons.Filled.Groups,
+                                    label = "Manage (${session.conferenceParticipants.size.coerceAtLeast(2)})",
+                                    active = true,
+                                    activeColor = SimAccentEmerald,
+                                    tag = "call_manage_conference_button",
+                                    onClick = {
+                                        haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                        showConferenceParticipantsDialog = true
+                                    },
+                                    modifier = Modifier.weight(1f)
+                                )
+                            } else {
+                                PrimaryCallControlTile(
+                                    icon = Icons.Filled.CallMerge,
+                                    label = "Merge",
+                                    active = session.canMergeCalls,
+                                    activeColor = SimAccentEmerald,
+                                    enabled = session.canMergeCalls,
+                                    tag = "call_merge_button",
+                                    onClick = {
+                                        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                        onMergeCalls()
+                                    },
+                                    modifier = Modifier.weight(1f)
+                                )
+                            }
+                            if (session.canSwapCalls) {
+                                PrimaryCallControlTile(
+                                    icon = Icons.Filled.SwapCalls,
+                                    label = "Swap",
+                                    active = false,
+                                    activeColor = AccentSkyBlue,
+                                    tag = "call_swap_button",
+                                    onClick = {
+                                        haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                        onSwapCalls()
+                                    },
+                                    modifier = Modifier.weight(1f)
+                                )
+                            }
+                        }
                     }
 
                     // Incoming Ringing Controls (Quick Reply + Decline / Answer) OR Active End Call Button
@@ -1117,6 +1477,28 @@ fun ActiveCallOverlay(
                 modifier = Modifier.testTag("record_permission_settings_dialog")
             )
         }
+        if (showAddCallerDialog) {
+            AddConferenceCallerDialog(
+                contacts = contacts,
+                onDialAdditionalCaller = { number ->
+                    showAddCallerDialog = false
+                    onAddCallToConference(number)
+                },
+                onDismiss = { showAddCallerDialog = false }
+            )
+        }
+
+        if (showConferenceParticipantsDialog) {
+            ConferenceParticipantsDialog(
+                participants = session.conferenceParticipants,
+                onSeparateParticipant = { callId ->
+                    showConferenceParticipantsDialog = false
+                    onSeparateParticipant(callId)
+                },
+                onDisconnectParticipant = onDisconnectParticipant,
+                onDismiss = { showConferenceParticipantsDialog = false }
+            )
+        }
     }
 }
 
@@ -1135,6 +1517,7 @@ private fun PrimaryCallControlTile(
     tag: String,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
+    enabled: Boolean = true,
     isLoading: Boolean = false,
     pulseIconAlpha: Float = 1f
 ) {
@@ -1147,8 +1530,9 @@ private fun PrimaryCallControlTile(
         ),
         modifier = modifier
             .height(74.dp)
+            .alpha(if (enabled) 1f else 0.45f)
             .clip(RoundedCornerShape(18.dp))
-            .clickable(enabled = !isLoading, onClick = onClick)
+            .clickable(enabled = enabled && !isLoading, onClick = onClick)
             .testTag(tag)
     ) {
         Column(

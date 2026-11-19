@@ -30,6 +30,7 @@ import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.CloudDone
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.DeleteOutline
+import androidx.compose.material.icons.filled.EditNote
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Lock
@@ -122,7 +123,8 @@ fun NumberCallHistoryDialog(
     onAddContact: (() -> Unit)?,
     onTogglePlayback: (CallRecordingEntity) -> Unit,
     onReportSpam: (String) -> Unit,
-    onDeleteLog: (Long) -> Unit
+    onDeleteLog: (Long) -> Unit,
+    onEditNote: ((CallLogEntity) -> Unit)? = null
 ) {
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
@@ -454,6 +456,7 @@ fun NumberCallHistoryDialog(
                                 hasRecording = linkedRec != null,
                                 isPlayingRecording = linkedRec != null && playingRecordingId == linkedRec.id,
                                 onToggleRecording = { linkedRec?.let(onTogglePlayback) },
+                                onEditNote = onEditNote?.let { cb -> { cb(entry) } },
                                 onDelete = { onDeleteLog(entry.id) }
                             )
                         }
@@ -470,6 +473,7 @@ private fun NumberHistoryRowCard(
     hasRecording: Boolean,
     isPlayingRecording: Boolean,
     onToggleRecording: () -> Unit,
+    onEditNote: (() -> Unit)?,
     onDelete: () -> Unit
 ) {
     val dirIcon = when (entry.direction) {
@@ -569,9 +573,55 @@ private fun NumberHistoryRowCard(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
+                if (entry.quickNote.isNotBlank()) {
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f),
+                        modifier = Modifier.padding(top = 3.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.EditNote,
+                                contentDescription = "Call note",
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(13.dp)
+                            )
+                            Text(
+                                text = entry.quickNote,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+                }
             }
 
             Row(verticalAlignment = Alignment.CenterVertically) {
+                if (onEditNote != null) {
+                    IconButton(
+                        onClick = onEditNote,
+                        modifier = Modifier
+                            .size(40.dp)
+                            .testTag("history_edit_note_${entry.id}")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.EditNote,
+                            contentDescription = if (entry.quickNote.isNotBlank()) "Edit call note" else "Add call note",
+                            tint = if (entry.quickNote.isNotBlank()) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            },
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                }
                 if (hasRecording) {
                     IconButton(
                         onClick = onToggleRecording,

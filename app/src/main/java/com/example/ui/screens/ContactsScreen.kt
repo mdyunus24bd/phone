@@ -1,5 +1,12 @@
 package com.example.ui.screens
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -10,6 +17,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -17,6 +25,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Call
@@ -38,6 +47,7 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -52,6 +62,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -64,6 +77,7 @@ import com.example.ui.components.formatTimestamp
 import com.example.ui.components.matchesCallHistoryTarget
 import com.example.ui.theme.AccentSkyBlue
 import com.example.ui.theme.CallAcceptGreen
+import com.example.ui.theme.CallEndRed
 import com.example.ui.theme.MonoMetricStyle
 import com.example.ui.theme.SimAccentEmerald
 
@@ -97,6 +111,7 @@ fun ContactsScreen(
 ) {
     var searchQuery by remember { mutableStateOf("") }
     var filter by remember { mutableStateOf(ContactFilter.ALL) }
+    var expandedContactId by remember { mutableStateOf<Long?>(null) }
     var historyContact by remember { mutableStateOf<ContactEntity?>(null) }
     val recordingsById = remember(recordings) { recordings.associateBy { it.id } }
 
@@ -369,6 +384,10 @@ fun ContactsScreen(
                     ContactCard(
                         contact = contact,
                         decryptedNote = decryptedNote,
+                        isExpanded = expandedContactId == contact.id,
+                        onToggleExpand = {
+                            expandedContactId = if (expandedContactId == contact.id) null else contact.id
+                        },
                         onOpenHistory = { historyContact = contact },
                         onCallSim = {
                             if (contact.phoneNumber.isNotBlank()) {
@@ -377,7 +396,12 @@ fun ContactsScreen(
                         },
                         onToggleFavorite = { onToggleFavorite(contact) },
                         onEdit = { onOpenEditContact(contact) },
-                        onDelete = { onDeleteContact(contact) }
+                        onDelete = {
+                            if (expandedContactId == contact.id) {
+                                expandedContactId = null
+                            }
+                            onDeleteContact(contact)
+                        }
                     )
                 }
             }
@@ -412,6 +436,8 @@ fun ContactsScreen(
 private fun ContactCard(
     contact: ContactEntity,
     decryptedNote: String,
+    isExpanded: Boolean,
+    onToggleExpand: () -> Unit,
     onOpenHistory: () -> Unit,
     onCallSim: () -> Unit,
     onToggleFavorite: () -> Unit,
@@ -420,17 +446,24 @@ private fun ContactCard(
 ) {
     Card(
         shape = RoundedCornerShape(18.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
+        colors = CardDefaults.cardColors(
+            containerColor = if (isExpanded) {
+                MaterialTheme.colorScheme.surfaceContainerHigh
+            } else {
+                MaterialTheme.colorScheme.surfaceContainer
+            }
+        ),
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(onClick = onOpenHistory)
+            .clickable(onClick = onToggleExpand)
+            .testTag("contact_card_${contact.id}")
     ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(14.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
+                .padding(horizontal = 14.dp, vertical = 12.dp)
         ) {
+            // Clean default contact row: Avatar, Name/Number, and icon-only SIM Call button on the right
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
@@ -450,7 +483,8 @@ private fun ContactCard(
                             text = contact.displayName,
                             style = MaterialTheme.typography.titleMedium,
                             maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f, fill = false)
                         )
                         Surface(
                             shape = RoundedCornerShape(6.dp),
@@ -468,7 +502,9 @@ private fun ContactCard(
                         Text(
                             text = contact.phoneNumber,
                             style = MonoMetricStyle,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
                     if (contact.googleAccountName.isNotBlank()) {
@@ -493,93 +529,163 @@ private fun ContactCard(
                         }
                     }
                 }
-                IconButton(onClick = onToggleFavorite) {
-                    Icon(
-                        imageVector = if (contact.favorite) Icons.Filled.Star else Icons.Outlined.StarBorder,
-                        contentDescription = if (contact.favorite) "Remove from favorites" else "Add to favorites",
-                        tint = if (contact.favorite) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            }
 
-            if (decryptedNote.isNotBlank()) {
-                Surface(
-                    shape = RoundedCornerShape(10.dp),
-                    color = MaterialTheme.colorScheme.surfaceContainerLow,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                // Right-side icon-only SIM Call button
+                if (contact.phoneNumber.isNotBlank()) {
+                    IconButton(
+                        onClick = onCallSim,
+                        modifier = Modifier
+                            .size(48.dp)
+                            .clip(CircleShape)
+                            .testTag("contact_sim_call_${contact.id}")
                     ) {
                         Icon(
-                            imageVector = Icons.Filled.Lock,
-                            contentDescription = "Encrypted private note",
-                            tint = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.size(13.dp)
-                        )
-                        Text(
-                            text = decryptedNote,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis
+                            imageVector = Icons.Filled.Call,
+                            contentDescription = "SIM Call ${contact.displayName}",
+                            tint = SimAccentEmerald,
+                            modifier = Modifier.size(22.dp)
                         )
                     }
                 }
             }
 
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+            // Expanded inside-contact options (History, Favorites, Edit, Delete) shown when clicked
+            AnimatedVisibility(
+                visible = isExpanded,
+                enter = expandVertically(
+                    animationSpec = spring(
+                        dampingRatio = Spring.DampingRatioNoBouncy,
+                        stiffness = Spring.StiffnessMediumLow
+                    )
+                ) + fadeIn(),
+                exit = shrinkVertically() + fadeOut()
             ) {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    if (contact.phoneNumber.isNotBlank()) {
-                        FilledTonalButton(
-                            onClick = onCallSim,
-                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-                            modifier = Modifier.height(36.dp)
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 12.dp)
+                        .testTag("contact_expanded_options_${contact.id}"),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    if (decryptedNote.isNotBlank()) {
+                        Surface(
+                            shape = RoundedCornerShape(10.dp),
+                            color = MaterialTheme.colorScheme.surfaceContainerLow,
+                            modifier = Modifier.fillMaxWidth()
                         ) {
-                            Icon(
-                                imageVector = Icons.Filled.Call,
-                                contentDescription = "Call SIM",
-                                tint = SimAccentEmerald,
-                                modifier = Modifier.size(15.dp)
-                            )
-                            Spacer(Modifier.width(5.dp))
-                            Text("SIM Call", style = MaterialTheme.typography.labelMedium)
+                            Row(
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.Lock,
+                                    contentDescription = "Encrypted private note",
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(13.dp)
+                                )
+                                Text(
+                                    text = decryptedNote,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
                         }
                     }
-                }
 
-                Row {
-                    IconButton(onClick = onOpenHistory, modifier = Modifier.size(40.dp)) {
-                        Icon(
-                            imageVector = Icons.Filled.History,
-                            contentDescription = "View contact call history",
+                    HorizontalDivider(
+                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
+                    )
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        ContactExpandedActionTile(
+                            icon = Icons.Filled.History,
+                            label = "History",
                             tint = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.size(18.dp)
+                            onClick = onOpenHistory,
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("contact_option_history_${contact.id}")
                         )
-                    }
-                    IconButton(onClick = onEdit, modifier = Modifier.size(40.dp)) {
-                        Icon(
-                            imageVector = Icons.Filled.Edit,
-                            contentDescription = "Edit contact",
-                            modifier = Modifier.size(18.dp)
+                        ContactExpandedActionTile(
+                            icon = if (contact.favorite) Icons.Filled.Star else Icons.Outlined.StarBorder,
+                            label = "Favorite",
+                            tint = if (contact.favorite) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            },
+                            onClick = onToggleFavorite,
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("contact_option_favorite_${contact.id}")
                         )
-                    }
-                    IconButton(onClick = onDelete, modifier = Modifier.size(40.dp)) {
-                        Icon(
-                            imageVector = Icons.Filled.DeleteOutline,
-                            contentDescription = "Delete contact",
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.size(18.dp)
+                        ContactExpandedActionTile(
+                            icon = Icons.Filled.Edit,
+                            label = "Edit",
+                            tint = MaterialTheme.colorScheme.onSurface,
+                            onClick = onEdit,
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("contact_option_edit_${contact.id}")
+                        )
+                        ContactExpandedActionTile(
+                            icon = Icons.Filled.DeleteOutline,
+                            label = "Delete",
+                            tint = CallEndRed,
+                            onClick = onDelete,
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("contact_option_delete_${contact.id}")
                         )
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun ContactExpandedActionTile(
+    icon: ImageVector,
+    label: String,
+    tint: Color,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
+        modifier = modifier
+            .heightIn(min = 52.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .clickable(onClick = onClick)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 8.dp, horizontal = 4.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = label,
+                tint = tint,
+                modifier = Modifier.size(18.dp)
+            )
+            Text(
+                text = label,
+                style = MaterialTheme.typography.labelSmall,
+                color = tint,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
         }
     }
 }

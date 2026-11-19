@@ -511,7 +511,7 @@ fun DialerScreen(
                         ) {
                             Spacer(Modifier.size(48.dp))
                             Text(
-                                text = dialInput.ifEmpty { "Enter number" },
+                                text = dialInput.ifEmpty { "" },
                                 style = if (dialInput.length > 13) {
                                     MaterialTheme.typography.headlineMedium
                                 } else {

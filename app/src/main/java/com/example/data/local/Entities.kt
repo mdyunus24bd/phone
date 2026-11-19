@@ -64,7 +64,8 @@ data class CallLogEntity(
     val spamScore: Int = 0,
     val spamReason: String = "",
     val recordingId: Long? = null,
-    val deviceTag: String = ""
+    val deviceTag: String = "",
+    val quickNote: String = ""
 ) {
     @get:Ignore
     val networkType: String

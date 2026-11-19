@@ -25,6 +25,47 @@ object SpamAnalyzer {
         "1900", "+1900", "0900", "900", "0870", "0871"
     )
 
+    /**
+     * Checks whether [address] matches a custom [SpamRuleEntity] pattern, supporting:
+     * - Exact match (case-insensitive)
+     * - Wildcard prefix patterns ending with `*` (e.g. `+1800*`)
+     * - Digit-only exact match (ignoring formatting dashes/spaces/parentheses)
+     * - Normalized last-10-digit suffix match so `+8801712345678` matches `01712345678`
+     */
+    fun matchesRule(address: String, rule: SpamRuleEntity): Boolean {
+        val trimmed = address.trim()
+        val cleanPattern = rule.pattern.trim()
+        if (trimmed.isEmpty() || cleanPattern.isEmpty()) return false
+
+        val digitsOnly = trimmed.filter { it.isDigit() }
+        val patternDigits = cleanPattern.filter { it.isDigit() }
+
+        return if (cleanPattern.endsWith("*")) {
+            val rawPrefix = cleanPattern.dropLast(1).trim()
+            val digitPrefix = rawPrefix.filter { it.isDigit() }
+            (rawPrefix.isNotEmpty() && trimmed.startsWith(rawPrefix, ignoreCase = true)) ||
+                (digitPrefix.isNotEmpty() && digitsOnly.startsWith(digitPrefix))
+        } else {
+            trimmed.equals(cleanPattern, ignoreCase = true) ||
+                (digitsOnly.isNotEmpty() && patternDigits.isNotEmpty() && digitsOnly == patternDigits) ||
+                (digitsOnly.length >= 10 && patternDigits.length >= 10 &&
+                    digitsOnly.takeLast(10) == patternDigits.takeLast(10))
+        }
+    }
+
+    /**
+     * Returns the first auto-blocking rule matching [address], or null if calls from [address]
+     * should not be automatically rejected.
+     */
+    fun findBlockingRule(
+        address: String,
+        customRules: List<SpamRuleEntity>
+    ): SpamRuleEntity? {
+        return customRules.firstOrNull { rule ->
+            rule.autoBlock && matchesRule(address, rule)
+        }
+    }
+
     fun evaluate(
         address: String,
         isKnownContact: Boolean,
@@ -35,17 +76,7 @@ object SpamAnalyzer {
 
         // 1. Check explicit user-managed blocklist / prefix rules first
         for (rule in customRules) {
-            val cleanPattern = rule.pattern.trim()
-            if (cleanPattern.isEmpty()) continue
-            val matched = if (cleanPattern.endsWith("*")) {
-                val prefix = cleanPattern.dropLast(1)
-                trimmed.startsWith(prefix, ignoreCase = true) ||
-                    digitsOnly.startsWith(prefix.filter { it.isDigit() })
-            } else {
-                trimmed.equals(cleanPattern, ignoreCase = true) ||
-                    (digitsOnly.isNotEmpty() && digitsOnly == cleanPattern.filter { it.isDigit() })
-            }
-            if (matched) {
+            if (matchesRule(trimmed, rule)) {
                 return SpamAssessment(
                     score = rule.riskScore.coerceIn(75, 100),
                     level = if (rule.autoBlock) SpamRiskLevel.BLOCKED else SpamRiskLevel.HIGH_RISK,

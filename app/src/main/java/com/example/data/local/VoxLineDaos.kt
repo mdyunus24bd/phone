@@ -70,6 +70,9 @@ interface SpamRuleDao {
     @Delete
     suspend fun delete(rule: SpamRuleEntity)
 
+    @Query("DELETE FROM spam_rules WHERE autoBlock = 1")
+    suspend fun deleteAllAutoBlocked()
+
     @Query("DELETE FROM spam_rules")
     suspend fun clearAll()
 }

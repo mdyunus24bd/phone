@@ -37,10 +37,12 @@ import com.example.ui.screens.ContactSaveDraft
 import com.example.telecom.ActiveTelecomCallBus
 import com.example.telecom.CallRecordingManager
 import com.example.telecom.CallRecordingState
+import com.example.telecom.ConferenceParticipantSnapshot
 import com.example.telecom.NetworkQualityEngine
 import com.example.telecom.NetworkQualitySample
 import com.example.telecom.RingtoneEngine
 import com.example.telecom.RingtoneOption
+import com.example.telecom.SecondaryCallSnapshot
 import com.example.telecom.SimSlotInfo
 import com.example.telecom.SpamAnalyzer
 import com.example.telecom.SpamAssessment
@@ -80,12 +82,19 @@ data class ActiveCallSession(
     val isRecordingBusy: Boolean = false,
     val recordingAudioSource: String = "",
     val recordingSec: Long = 0L,
+    val recordingAudioLevel: Float = 0f,
+    val isRecordingSilenced: Boolean = false,
     val encryptedTransport: Boolean = false,
     val qualitySamples: List<NetworkQualitySample> = emptyList(),
     val spamAssessment: SpamAssessment? = null,
     val finishedRecordingId: Long? = null,
     val cannedQuickReplies: List<String> = emptyList(),
-    val photoUri: String = ""
+    val photoUri: String = "",
+    val isConference: Boolean = false,
+    val conferenceParticipants: List<ConferenceParticipantSnapshot> = emptyList(),
+    val secondaryCall: SecondaryCallSnapshot? = null,
+    val canMergeCalls: Boolean = false,
+    val canSwapCalls: Boolean = false
 )
 
 class VoxLineViewModel(application: Application) : AndroidViewModel(application) {
@@ -263,26 +272,83 @@ class VoxLineViewModel(application: Application) : AndroidViewModel(application)
         }
         autoSyncDeviceData(silent = true)
         viewModelScope.launch {
+            callRecordingManager.liveAudioLevel.collect { level ->
+                if (_activeCall.value?.isRecording == true) {
+                    _activeCall.update { it?.copy(recordingAudioLevel = level) }
+                }
+            }
+        }
+        viewModelScope.launch {
+            callRecordingManager.isAudioSilenced.collect { silenced ->
+                if (_activeCall.value?.isRecording == true) {
+                    _activeCall.update { it?.copy(isRecordingSilenced = silenced) }
+                }
+            }
+        }
+        viewModelScope.launch {
             ActiveTelecomCallBus.systemCall.collect { sysCall ->
                 if (sysCall != null) {
                     val existing = _activeCall.value
+                    val resolvedParticipants = sysCall.conferenceParticipants.map { participant ->
+                        val pDigits = participant.handle.filter { it.isDigit() }
+                        val pContact = contacts.value.firstOrNull { c ->
+                            val cd = c.phoneNumber.filter { it.isDigit() }
+                            cd.isNotEmpty() && pDigits.isNotEmpty() && (
+                                cd == pDigits ||
+                                    (cd.length >= 10 && pDigits.length >= 10 && cd.takeLast(10) == pDigits.takeLast(10))
+                                )
+                        }
+                        if (pContact != null) {
+                            participant.copy(displayName = pContact.displayName)
+                        } else {
+                            participant
+                        }
+                    }
+                    val resolvedSecondary = sysCall.secondaryCall?.let { sec ->
+                        if (sec.isConference) {
+                            sec
+                        } else {
+                            val sDigits = sec.handle.filter { it.isDigit() }
+                            val sContact = contacts.value.firstOrNull { c ->
+                                val cd = c.phoneNumber.filter { it.isDigit() }
+                                cd.isNotEmpty() && sDigits.isNotEmpty() && (
+                                    cd == sDigits ||
+                                        (cd.length >= 10 && sDigits.length >= 10 && cd.takeLast(10) == sDigits.takeLast(10))
+                                    )
+                            }
+                            if (sContact != null) sec.copy(displayName = sContact.displayName) else sec
+                        }
+                    }
+
                     val liveStatus = when {
+                        sysCall.isConference && sysCall.isHolding -> "Conference On Hold"
+                        sysCall.isConference -> "Conference • ${resolvedParticipants.size.coerceAtLeast(2)} callers"
                         sysCall.isRinging -> "Incoming SIM Call"
                         sysCall.isHolding -> "Call On Hold"
                         sysCall.isDialing -> "Dialing via SIM..."
                         sysCall.isConnected -> "Connected (SIM)"
                         else -> "SIM Call"
                     }
+
+                    val matched = if (sysCall.isConference) null else repository.findContactByAddress(sysCall.handle)
+                    val resolvedDisplayName = when {
+                        sysCall.isConference -> "Conference Call"
+                        else -> matched?.displayName.orEmpty()
+                    }
+
                     if (existing == null || !existing.isSystemTelecomCall) {
-                        val matched = repository.findContactByAddress(sysCall.handle)
-                        val assessment = SpamAnalyzer.evaluate(
-                            sysCall.handle,
-                            matched != null,
-                            spamRules.value
-                        )
+                        val assessment = if (sysCall.isConference) {
+                            null
+                        } else {
+                            SpamAnalyzer.evaluate(
+                                sysCall.handle,
+                                matched != null,
+                                spamRules.value
+                            )
+                        }
                         _activeCall.value = ActiveCallSession(
                             address = sysCall.handle,
-                            displayName = matched?.displayName.orEmpty(),
+                            displayName = resolvedDisplayName,
                             networkType = "SIM",
                             routeLabel = _activeSims.value.firstOrNull()?.displayName ?: "SIM Cellular",
                             isSystemTelecomCall = true,
@@ -293,7 +359,12 @@ class VoxLineViewModel(application: Application) : AndroidViewModel(application)
                             encryptedTransport = false,
                             spamAssessment = assessment,
                             cannedQuickReplies = sysCall.cannedTextResponses,
-                            photoUri = matched?.photoUri.orEmpty()
+                            photoUri = matched?.photoUri.orEmpty(),
+                            isConference = sysCall.isConference,
+                            conferenceParticipants = resolvedParticipants,
+                            secondaryCall = resolvedSecondary,
+                            canMergeCalls = sysCall.canMergeCalls,
+                            canSwapCalls = sysCall.canSwapCalls
                         )
                         if (sysCall.isRinging) {
                             val rt = settings.value.ringtones
@@ -311,12 +382,21 @@ class VoxLineViewModel(application: Application) : AndroidViewModel(application)
                         }
                     } else {
                         val justConnected = !sysCall.isRinging && sysCall.isConnected && existing.isRinging
+                        val primaryChanged = existing.address != sysCall.handle || existing.isConference != sysCall.isConference
                         _activeCall.update { cur ->
                             cur?.copy(
+                                address = sysCall.handle,
+                                displayName = if (primaryChanged) resolvedDisplayName else cur.displayName,
+                                photoUri = if (primaryChanged) matched?.photoUri.orEmpty() else cur.photoUri,
                                 isRinging = sysCall.isRinging,
                                 isOnHold = sysCall.isHolding,
                                 statusLabel = liveStatus,
-                                cannedQuickReplies = sysCall.cannedTextResponses
+                                cannedQuickReplies = sysCall.cannedTextResponses,
+                                isConference = sysCall.isConference,
+                                conferenceParticipants = resolvedParticipants,
+                                secondaryCall = resolvedSecondary,
+                                canMergeCalls = sysCall.canMergeCalls,
+                                canSwapCalls = sysCall.canSwapCalls
                             )
                         }
                         if (!sysCall.isRinging) {
@@ -601,14 +681,15 @@ class VoxLineViewModel(application: Application) : AndroidViewModel(application)
                 isAutoTriggered = true
             )
             if (started.isSuccess) {
-                val sourceLabel = started.getOrDefault("VOICE_COMM")
+                val sourceLabel = started.getOrDefault("VOICE_RECOG")
                 _activeCall.update {
                     it?.copy(
                         isRecording = true,
                         isAutoRecording = true,
                         isRecordingBusy = false,
                         recordingAudioSource = sourceLabel,
-                        recordingSec = 0L
+                        recordingSec = 0L,
+                        isRecordingSilenced = callRecordingManager.isAudioSilenced.value
                     )
                 }
                 val modeLabel = if (settings.value.autoRecordMode == AutoRecordMode.SPECIFIC_NUMBERS) {
@@ -765,6 +846,56 @@ class VoxLineViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
+    // Carrier Conference Call Controls
+    fun addCallToConference(phoneNumber: String) {
+        val clean = phoneNumber.trim()
+        if (clean.isEmpty() || clean.none { it.isDigit() }) {
+            showMessage("Enter a valid phone number to add to the call.")
+            return
+        }
+        val dispatched = telecomBridge.placeCarrierSimCall(
+            number = clean,
+            preferredSlotIndex = _selectedSimIndex.value
+        )
+        if (dispatched) {
+            showMessage("Dialing $clean — tap Merge once connected to start conference.")
+        } else {
+            showMessage("Unable to add another SIM call on this device.")
+        }
+    }
+
+    fun mergeCallsIntoConference() {
+        val merged = ActiveTelecomCallBus.mergeCalls()
+        if (merged) {
+            showMessage("Merging calls into carrier conference...")
+        } else {
+            showMessage("Add and connect a second call first, or check carrier conference support.")
+        }
+    }
+
+    fun swapActiveAndHeldCalls() {
+        val swapped = ActiveTelecomCallBus.swapCalls()
+        if (!swapped) {
+            showMessage("No held call available to swap.")
+        }
+    }
+
+    fun splitConferenceParticipant(callId: String) {
+        val ok = ActiveTelecomCallBus.separateConferenceParticipant(callId)
+        if (ok) {
+            showMessage("Separated caller into a private call.")
+        } else {
+            showMessage("Carrier does not support splitting this participant.")
+        }
+    }
+
+    fun disconnectConferenceParticipant(callId: String) {
+        val ok = ActiveTelecomCallBus.disconnectConferenceParticipant(callId)
+        if (ok) {
+            showMessage("Removed participant from conference call.")
+        }
+    }
+
     fun onRecordAudioPermissionDenied(permanentlyDenied: Boolean) {
         showMessage(
             if (permanentlyDenied) {
@@ -792,14 +923,15 @@ class VoxLineViewModel(application: Application) : AndroidViewModel(application)
                     isAutoTriggered = false
                 )
                 if (result.isSuccess) {
-                    val sourceLabel = result.getOrDefault("VOICE_COMM")
+                    val sourceLabel = result.getOrDefault("VOICE_RECOG")
                     _activeCall.update {
                         it?.copy(
                             isRecording = true,
                             isAutoRecording = false,
                             isRecordingBusy = false,
                             recordingAudioSource = sourceLabel,
-                            recordingSec = 0L
+                            recordingSec = 0L,
+                            isRecordingSilenced = callRecordingManager.isAudioSilenced.value
                         )
                     }
                     showMessage("Call recording started • Saving to App Internal Storage.")
@@ -837,6 +969,8 @@ class VoxLineViewModel(application: Application) : AndroidViewModel(application)
                             isAutoRecording = false,
                             isRecordingBusy = false,
                             recordingAudioSource = "",
+                            recordingAudioLevel = 0f,
+                            isRecordingSilenced = false,
                             finishedRecordingId = recId
                         )
                     }
@@ -847,11 +981,56 @@ class VoxLineViewModel(application: Application) : AndroidViewModel(application)
                             isRecording = false,
                             isAutoRecording = false,
                             isRecordingBusy = false,
-                            recordingAudioSource = ""
+                            recordingAudioSource = "",
+                            recordingAudioLevel = 0f,
+                            isRecordingSilenced = false
                         )
                     }
                     showMessage("Could not save recording: ${finished.exceptionOrNull()?.message}")
                 }
+            }
+        }
+    }
+
+    /**
+     * Re-probes Android audio sources during an active call (e.g., after enabling
+     * VoxLine Call Audio Helper or switching speakerphone) to capture non-silenced audio.
+     */
+    fun retryCallRecording() {
+        val current = _activeCall.value ?: return
+        if (current.isRecordingBusy || !callRecordingManager.hasRecordAudioPermission()) return
+        viewModelScope.launch {
+            _activeCall.update { it?.copy(isRecordingBusy = true) }
+            if (current.isRecording || callRecordingManager.isRecording) {
+                callRecordingManager.cancelRecording()
+            }
+            val result = callRecordingManager.startBackgroundRecording(
+                callerLabel = current.displayName.ifBlank { current.address },
+                networkType = current.networkType,
+                isAutoTriggered = current.isAutoRecording
+            )
+            if (result.isSuccess) {
+                val sourceLabel = result.getOrDefault("VOICE_RECOG")
+                _activeCall.update {
+                    it?.copy(
+                        isRecording = true,
+                        isRecordingBusy = false,
+                        recordingAudioSource = sourceLabel,
+                        recordingSec = 0L,
+                        isRecordingSilenced = callRecordingManager.isAudioSilenced.value
+                    )
+                }
+                showMessage("Re-started call capture on $sourceLabel.")
+            } else {
+                _activeCall.update {
+                    it?.copy(
+                        isRecording = false,
+                        isRecordingBusy = false,
+                        recordingAudioLevel = 0f,
+                        isRecordingSilenced = false
+                    )
+                }
+                showMessage("Recording unavailable: ${result.exceptionOrNull()?.localizedMessage ?: "Audio busy"}")
             }
         }
     }
@@ -1127,6 +1306,17 @@ class VoxLineViewModel(application: Application) : AndroidViewModel(application)
         viewModelScope.launch { repository.deleteCallLog(id) }
     }
 
+    fun saveCallLogNote(callLogId: Long, note: String) {
+        val cleaned = note.trim().take(240)
+        viewModelScope.launch {
+            repository.updateCallLogNote(callLogId, cleaned)
+            showMessage(
+                if (cleaned.isNotEmpty()) "Call note saved."
+                else "Call note cleared."
+            )
+        }
+    }
+
     // DataStore-Backed Call Forwarding Settings
     fun toggleCallForwarding(enabled: Boolean) {
         viewModelScope.launch {
@@ -1224,7 +1414,7 @@ class VoxLineViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
-    // Spam Shield Rules
+    // Spam Shield & Blocked Numbers
     fun addSpamRule(pattern: String, label: String, riskScore: Int = 95, autoBlock: Boolean = true) {
         if (pattern.isBlank()) {
             showMessage("Enter a phone number or prefix (e.g. +1900*).")
@@ -1240,6 +1430,36 @@ class VoxLineViewModel(application: Application) : AndroidViewModel(application)
         viewModelScope.launch {
             repository.deleteSpamRule(rule)
             showMessage("Removed rule ${rule.pattern}.")
+        }
+    }
+
+    fun blockPhoneNumber(phoneNumber: String, label: String = "") {
+        val clean = phoneNumber.trim()
+        if (clean.isEmpty() || clean.none { it.isDigit() }) {
+            showMessage("Enter a valid phone number to block.")
+            return
+        }
+        viewModelScope.launch {
+            val added = repository.blockNumber(clean, label)
+            if (added) {
+                showMessage("Blocked $clean — incoming calls will be auto-rejected.")
+            } else {
+                showMessage("$clean is already in your Blocked Numbers list.")
+            }
+        }
+    }
+
+    fun unblockPhoneNumber(rule: SpamRuleEntity) {
+        viewModelScope.launch {
+            repository.deleteSpamRule(rule)
+            showMessage("Unblocked ${rule.pattern}.")
+        }
+    }
+
+    fun clearAllBlockedNumbers() {
+        viewModelScope.launch {
+            repository.clearAllBlockedNumbers()
+            showMessage("Cleared all blocked numbers.")
         }
     }
 

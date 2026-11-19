@@ -17,6 +17,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.CloudOff
 import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.DeleteForever
@@ -76,6 +77,7 @@ fun SpamShieldSection(
     spamRules: List<SpamRuleEntity>,
     onToggleSpamShield: (Boolean) -> Unit,
     onToggleAutoBlock: (Boolean) -> Unit,
+    onOpenBlockedNumbers: () -> Unit,
     onAddSpamRule: (String, String, Int, Boolean) -> Unit,
     onDeleteSpamRule: (SpamRuleEntity) -> Unit,
     onCheckSpamNumber: (String) -> SpamAssessment
@@ -131,6 +133,21 @@ fun SpamShieldSection(
                         checked = settings.autoBlockHighRiskSpam,
                         onCheckedChange = onToggleAutoBlock
                     )
+                }
+                OutlinedButton(
+                    onClick = onOpenBlockedNumbers,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("spam_section_manage_blocked_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.Block,
+                        contentDescription = null,
+                        tint = CallEndRed,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text("Manage Blocked Numbers (${spamRules.count { it.autoBlock }})")
                 }
             }
         }

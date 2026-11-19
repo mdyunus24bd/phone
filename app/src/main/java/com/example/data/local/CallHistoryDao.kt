@@ -37,6 +37,7 @@ interface CallHistoryDao {
            OR displayName LIKE '%' || :query || '%'
            OR contact_name LIKE '%' || :query || '%'
            OR routeLabel LIKE '%' || :query || '%'
+           OR quickNote LIKE '%' || :query || '%'
         ORDER BY timestamp DESC
         """
     )
@@ -68,6 +69,9 @@ interface CallHistoryDao {
 
     @Update
     suspend fun update(entry: CallLogEntity)
+
+    @Query("UPDATE call_logs SET quickNote = :note WHERE id = :id")
+    suspend fun updateQuickNote(id: Long, note: String)
 
     @Query("DELETE FROM call_logs WHERE id = :id")
     suspend fun deleteById(id: Long)

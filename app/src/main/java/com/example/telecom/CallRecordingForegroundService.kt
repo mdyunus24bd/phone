@@ -17,10 +17,19 @@ import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import com.example.MainActivity
 import com.example.R
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
- * Microphone-typed Foreground Service that keeps background MediaRecorder call capture
+ * Microphone-typed Foreground Service that keeps background call audio capture
  * alive when the user navigates away from the active call screen or locks the device.
+ *
+ * Exposes [startAndAwaitReady] so [CallRecordingManager] waits until Android has actually
+ * promoted the microphone FGS before opening AudioRecord (preventing Android 11+ FGS
+ * startup race conditions that silently zero-fill captured audio).
  */
 class CallRecordingForegroundService : Service() {
 
@@ -29,6 +38,7 @@ class CallRecordingForegroundService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_STOP -> {
+                _isForegroundActive.value = false
                 stopForegroundCompat()
                 stopSelf()
                 return START_NOT_STICKY
@@ -39,6 +49,7 @@ class CallRecordingForegroundService : Service() {
                     Manifest.permission.RECORD_AUDIO
                 ) == PackageManager.PERMISSION_GRANTED
                 if (!hasRecordPerm) {
+                    _isForegroundActive.value = false
                     stopSelf()
                     return START_NOT_STICKY
                 }
@@ -53,10 +64,13 @@ class CallRecordingForegroundService : Service() {
                         0
                     }
                     ServiceCompat.startForeground(this, NOTIFICATION_ID, notification, fgsType)
+                    _isForegroundActive.value = true
                 } catch (_: SecurityException) {
+                    _isForegroundActive.value = false
                     stopSelf()
                     return START_NOT_STICKY
                 } catch (_: IllegalStateException) {
+                    _isForegroundActive.value = false
                     stopSelf()
                     return START_NOT_STICKY
                 }
@@ -67,6 +81,7 @@ class CallRecordingForegroundService : Service() {
     }
 
     override fun onDestroy() {
+        _isForegroundActive.value = false
         stopForegroundCompat()
         super.onDestroy()
     }
@@ -133,6 +148,9 @@ class CallRecordingForegroundService : Service() {
         private const val EXTRA_CALLER_LABEL = "extra_caller_label"
         private const val EXTRA_NETWORK_TYPE = "extra_network_type"
 
+        private val _isForegroundActive = MutableStateFlow(false)
+        val isForegroundActive: StateFlow<Boolean> = _isForegroundActive.asStateFlow()
+
         fun start(context: Context, callerLabel: String, networkType: String) {
             val intent = Intent(context, CallRecordingForegroundService::class.java).apply {
                 action = ACTION_START
@@ -144,7 +162,25 @@ class CallRecordingForegroundService : Service() {
             }
         }
 
+        /**
+         * Starts the microphone foreground service and suspends until [ServiceCompat.startForeground]
+         * completes (or [timeoutMs] elapses), preventing Android 11+ silent capture races.
+         */
+        suspend fun startAndAwaitReady(
+            context: Context,
+            callerLabel: String,
+            networkType: String,
+            timeoutMs: Long = 1500L
+        ): Boolean {
+            if (_isForegroundActive.value) return true
+            start(context, callerLabel, networkType)
+            return withTimeoutOrNull(timeoutMs) {
+                isForegroundActive.first { it }
+            } == true
+        }
+
         fun stop(context: Context) {
+            _isForegroundActive.value = false
             val intent = Intent(context, CallRecordingForegroundService::class.java).apply {
                 action = ACTION_STOP
             }

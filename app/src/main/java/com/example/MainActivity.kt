@@ -64,7 +64,9 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.data.local.ContactEntity
+import com.example.telecom.IncomingCallNotificationManager
 import com.example.ui.screens.ActiveCallOverlay
+import com.example.ui.screens.BlockedNumbersScreen
 import com.example.ui.screens.ContactEditorScreen
 import com.example.ui.screens.ContactSaveDraft
 import com.example.ui.screens.ContactsScreen
@@ -101,6 +103,10 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        IncomingCallNotificationManager.ensureChannels(this)
+        if (intent?.getBooleanExtra(IncomingCallNotificationManager.EXTRA_OPEN_ACTIVE_CALL, false) == true) {
+            applyCallOverDisplayWindowFlags(enable = true)
+        }
         viewModel.handleIncomingIntent(intent)
         if (isDialIntent(intent)) {
             openKeypadOnDialIntent.value = true
@@ -108,6 +114,7 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             val settings by viewModel.settings.collectAsStateWithLifecycle()
+            val activeCall by viewModel.activeCall.collectAsStateWithLifecycle()
 
             LaunchedEffect(settings.screenPrivacySecure) {
                 if (settings.screenPrivacySecure) {
@@ -115,6 +122,10 @@ class MainActivity : ComponentActivity() {
                 } else {
                     window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
                 }
+            }
+
+            LaunchedEffect(activeCall != null) {
+                applyCallOverDisplayWindowFlags(enable = activeCall != null)
             }
 
             VoxLineTheme(
@@ -134,9 +145,33 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
+        if (intent.getBooleanExtra(IncomingCallNotificationManager.EXTRA_OPEN_ACTIVE_CALL, false)) {
+            applyCallOverDisplayWindowFlags(enable = true)
+        }
         viewModel.handleIncomingIntent(intent)
         if (isDialIntent(intent)) {
             openKeypadOnDialIntent.value = true
+        }
+    }
+
+    private fun applyCallOverDisplayWindowFlags(enable: Boolean) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            setShowWhenLocked(enable)
+            setTurnScreenOn(enable)
+        } else {
+            @Suppress("DEPRECATION")
+            val legacyFlags = WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+                WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
+            if (enable) {
+                window.addFlags(legacyFlags)
+            } else {
+                window.clearFlags(legacyFlags)
+            }
+        }
+        if (enable) {
+            window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        } else {
+            window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         }
     }
 
@@ -188,6 +223,7 @@ private fun VoxLineRootApp(
     var currentControlTab by rememberSaveable { mutableStateOf(ControlTab.RECORDING) }
     var showKeypadPage by rememberSaveable { mutableStateOf(false) }
     var showSettings by rememberSaveable { mutableStateOf(false) }
+    var showBlockedNumbersScreen by rememberSaveable { mutableStateOf(false) }
     var contactEditorRequest by remember { mutableStateOf<ContactEditorRequest?>(null) }
     var pendingSyncPassphrase by remember { mutableStateOf("") }
     var pendingContactDraft by remember { mutableStateOf<ContactSaveDraft?>(null) }
@@ -208,14 +244,51 @@ private fun VoxLineRootApp(
         }
     }
 
+    var canShowIncomingOverDisplay by remember {
+        mutableStateOf(
+            IncomingCallNotificationManager.hasNotificationPermission(context) &&
+                IncomingCallNotificationManager.canUseFullScreenIntent(context)
+        )
+    }
+
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
                 viewModel.refreshDeviceTelephonyState()
+                canShowIncomingOverDisplay =
+                    IncomingCallNotificationManager.hasNotificationPermission(context) &&
+                        IncomingCallNotificationManager.canUseFullScreenIntent(context)
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    val postNotificationsPermLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        canShowIncomingOverDisplay = granted && IncomingCallNotificationManager.canUseFullScreenIntent(context)
+        if (granted && !IncomingCallNotificationManager.canUseFullScreenIntent(context)) {
+            runCatching {
+                context.startActivity(
+                    IncomingCallNotificationManager.createFullScreenIntentSettingsIntent(context)
+                )
+            }
+        }
+    }
+
+    val requestIncomingOverDisplayAction: () -> Unit = {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            !IncomingCallNotificationManager.hasNotificationPermission(context)
+        ) {
+            postNotificationsPermLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        } else {
+            runCatching {
+                context.startActivity(
+                    IncomingCallNotificationManager.createFullScreenIntentSettingsIntent(context)
+                )
+            }
+        }
     }
 
     // Default Dialer role launcher
@@ -392,6 +465,7 @@ private fun VoxLineRootApp(
     BackHandler(
         enabled = activeCall == null &&
             contactEditorRequest == null &&
+            !showBlockedNumbersScreen &&
             !showSettings &&
             !showKeypadPage &&
             currentDestination != VoxDestination.RECENTS
@@ -407,7 +481,7 @@ private fun VoxLineRootApp(
                 modifier = Modifier.fillMaxSize(),
                 snackbarHost = { SnackbarHost(hostState = snackbarHostState) },
                 floatingActionButton = {
-                    if (!showKeypadPage && !showSettings && contactEditorRequest == null && activeCall == null) {
+                    if (!showKeypadPage && !showSettings && !showBlockedNumbersScreen && contactEditorRequest == null && activeCall == null) {
                         FloatingActionButton(
                             onClick = { showKeypadPage = true },
                             containerColor = MaterialTheme.colorScheme.primary,
@@ -491,6 +565,7 @@ private fun VoxLineRootApp(
                                 callLogs = callLogs,
                                 contacts = contacts,
                                 isDefaultDialer = isDefaultDialer,
+                                canShowIncomingOverDisplay = canShowIncomingOverDisplay,
                                 recordings = recordings,
                                 playingRecordingId = playingRecordingId,
                                 hasCallLogPermission = hasCallLogPermission,
@@ -509,12 +584,14 @@ private fun VoxLineRootApp(
                                     )
                                 },
                                 onRequestDefaultDialer = requestDefaultDialerAction,
+                                onEnableIncomingOverDisplay = requestIncomingOverDisplayAction,
                                 onTogglePlayback = viewModel::togglePlayback,
                                 onDeleteRecording = viewModel::deleteRecording,
                                 onReportSpam = { num ->
                                     viewModel.addSpamRule(num, "Reported Spam", 95, true)
                                 },
                                 onDeleteLog = viewModel::deleteCallLog,
+                                onSaveCallNote = viewModel::saveCallLogNote,
                                 onSyncSystemCallLog = {
                                     if (ContextCompat.checkSelfPermission(
                                             context,
@@ -668,12 +745,13 @@ private fun VoxLineRootApp(
         }
 
         // Settings Screen containing all Control options (Recording, Ringtones, Quality, Forwarding, Spam, Privacy & Theme)
-        if (showSettings && contactEditorRequest == null && activeCall == null) {
+        if (showSettings && !showBlockedNumbersScreen && contactEditorRequest == null && activeCall == null) {
             ControlCenterScreen(
                 selectedTab = currentControlTab,
                 onSelectTab = { currentControlTab = it },
                 onBack = {
                     viewModel.stopRingtonePreview()
+                    showBlockedNumbersScreen = false
                     showSettings = false
                 },
                 settings = settings,
@@ -729,6 +807,7 @@ private fun VoxLineRootApp(
                 onResetQuickReplyTemplates = viewModel::resetQuickReplyTemplates,
                 onToggleSpamShield = viewModel::setSpamShield,
                 onToggleAutoBlock = viewModel::setAutoBlockSpam,
+                onOpenBlockedNumbers = { showBlockedNumbersScreen = true },
                 onAddSpamRule = viewModel::addSpamRule,
                 onDeleteSpamRule = viewModel::deleteSpamRule,
                 onCheckSpamNumber = viewModel::evaluateManualSpamCheck,
@@ -750,17 +829,43 @@ private fun VoxLineRootApp(
             )
         }
 
+        // Dedicated Full-Screen Blocked Numbers Settings Page
+        AnimatedVisibility(
+            visible = showBlockedNumbersScreen && activeCall == null,
+            enter = slideInVertically(initialOffsetY = { it / 6 }) + fadeIn(),
+            exit = slideOutVertically(targetOffsetY = { it / 6 }) + fadeOut(),
+            modifier = Modifier.fillMaxSize()
+        ) {
+            BlockedNumbersScreen(
+                blockedRules = remember(spamRules) { spamRules.filter { it.autoBlock } },
+                contacts = contacts,
+                callLogs = callLogs,
+                onBlockNumber = viewModel::blockPhoneNumber,
+                onUnblockNumber = viewModel::unblockPhoneNumber,
+                onClearAllBlocked = viewModel::clearAllBlockedNumbers,
+                onBack = { showBlockedNumbersScreen = false },
+                snackbarHostState = snackbarHostState
+            )
+        }
+
         // Full-Screen Active Call & Real-Time Quality Telemetry HUD Overlay
         activeCall?.let { session ->
             ActiveCallOverlay(
                 session = session,
+                contacts = contacts,
                 quickReplyTemplates = settings.quickReplyTemplates,
                 onToggleMute = viewModel::toggleMute,
                 onToggleSpeaker = viewModel::toggleSpeaker,
                 onToggleHold = viewModel::toggleHold,
                 onToggleRecord = viewModel::toggleCallRecording,
+                onRetryRecord = viewModel::retryCallRecording,
                 onRecordPermissionDenied = viewModel::onRecordAudioPermissionDenied,
                 onSendDtmf = viewModel::appendDigit,
+                onAddCallToConference = viewModel::addCallToConference,
+                onMergeCalls = viewModel::mergeCallsIntoConference,
+                onSwapCalls = viewModel::swapActiveAndHeldCalls,
+                onSeparateParticipant = viewModel::splitConferenceParticipant,
+                onDisconnectParticipant = viewModel::disconnectConferenceParticipant,
                 onAnswerCall = viewModel::answerIncomingCall,
                 onDeclineCall = viewModel::declineIncomingCall,
                 onDeclineWithQuickReply = viewModel::declineWithQuickReply,

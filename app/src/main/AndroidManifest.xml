@@ -8,6 +8,8 @@
     <uses-permission android:name="android.permission.VIBRATE" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     <uses-permission android:name="android.permission.MANAGE_OWN_CALLS" />
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
 
@@ -43,6 +45,8 @@
             android:exported="true"
             android:label="@string/app_name"
             android:launchMode="singleTask"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true"
             android:theme="@style/Theme.MyApplication">
 
             <intent-filter>
@@ -90,6 +94,25 @@
             android:name=".telecom.CallRecordingForegroundService"
             android:exported="false"
             android:foregroundServiceType="microphone" />
+
+        <!-- Optional Android 10+ Call Audio Helper allowing non-silenced VOICE_RECOGNITION call capture -->
+        <service
+            android:name=".telecom.CallRecordingAccessibilityService"
+            android:exported="true"
+            android:label="@string/accessibility_call_audio_label"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/call_recording_accessibility_config" />
+        </service>
+
+        <!-- Handles Answer, Decline, and Hang Up actions from over-display CallStyle notifications -->
+        <receiver
+            android:name=".telecom.IncomingCallActionReceiver"
+            android:exported="false" />
     </application>
 
 </manifest>

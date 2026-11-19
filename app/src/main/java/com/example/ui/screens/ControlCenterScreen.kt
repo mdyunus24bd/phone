@@ -21,8 +21,12 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.FiberManualRecord
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.NetworkCheck
@@ -133,6 +137,7 @@ fun ControlCenterScreen(
     onResetQuickReplyTemplates: () -> Unit,
     onToggleSpamShield: (Boolean) -> Unit,
     onToggleAutoBlock: (Boolean) -> Unit,
+    onOpenBlockedNumbers: () -> Unit,
     onAddSpamRule: (String, String, Int, Boolean) -> Unit,
     onDeleteSpamRule: (SpamRuleEntity) -> Unit,
     onCheckSpamNumber: (String) -> SpamAssessment,
@@ -230,6 +235,67 @@ fun ControlCenterScreen(
                     }
                 }
 
+                // Dedicated Blocked Numbers Settings Entry Card
+                item {
+                    val blockedCount = remember(spamRules) { spamRules.count { it.autoBlock } }
+                    Surface(
+                        shape = RoundedCornerShape(18.dp),
+                        color = MaterialTheme.colorScheme.surfaceContainer,
+                        tonalElevation = 1.dp,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(18.dp))
+                            .clickable(onClick = onOpenBlockedNumbers)
+                            .testTag("open_blocked_numbers_settings_card")
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 14.dp, vertical = 14.dp),
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(42.dp)
+                                    .clip(CircleShape)
+                                    .background(CallEndRed.copy(alpha = 0.15f)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.Block,
+                                    contentDescription = "Blocked Numbers",
+                                    tint = CallEndRed,
+                                    modifier = Modifier.size(22.dp)
+                                )
+                            }
+                            Column(
+                                modifier = Modifier.weight(1f),
+                                verticalArrangement = Arrangement.spacedBy(2.dp)
+                            ) {
+                                Text(
+                                    text = "Blocked Numbers",
+                                    style = MaterialTheme.typography.titleMedium
+                                )
+                                Text(
+                                    text = if (blockedCount == 0) {
+                                        "Manage numbers to automatically reject incoming calls"
+                                    } else {
+                                        "$blockedCount ${if (blockedCount == 1) "number" else "numbers"} blocked • Auto-reject active"
+                                    },
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                                contentDescription = "Open Blocked Numbers",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+
                 // Section Selector Chips
                 item {
                     LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -303,6 +369,7 @@ fun ControlCenterScreen(
                             spamRules = spamRules,
                             onToggleSpamShield = onToggleSpamShield,
                             onToggleAutoBlock = onToggleAutoBlock,
+                            onOpenBlockedNumbers = onOpenBlockedNumbers,
                             onAddSpamRule = onAddSpamRule,
                             onDeleteSpamRule = onDeleteSpamRule,
                             onCheckSpamNumber = onCheckSpamNumber

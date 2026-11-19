@@ -40,15 +40,19 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.CallMade
 import androidx.compose.material.icons.automirrored.filled.CallMissed
 import androidx.compose.material.icons.automirrored.filled.CallReceived
+import androidx.compose.material.icons.automirrored.filled.NoteAdd
 import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.DeleteOutline
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.EditNote
 import androidx.compose.material.icons.filled.FiberManualRecord
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.PersonAdd
 import androidx.compose.material.icons.filled.PhoneAndroid
 import androidx.compose.material.icons.filled.PlayArrow
@@ -100,6 +104,7 @@ import com.example.ui.components.ContactAvatar
 import com.example.ui.components.MosBadge
 import com.example.ui.components.NetworkBadge
 import com.example.ui.components.NumberCallHistoryDialog
+import com.example.ui.components.QuickCallNoteDialog
 import com.example.ui.components.formatDuration
 import com.example.ui.components.formatTimestamp
 import com.example.ui.components.matchesCallHistoryTarget
@@ -115,6 +120,7 @@ import kotlin.math.roundToInt
 private enum class RecentsFilter(val label: String) {
     ALL("All"),
     MISSED("Missed"),
+    NOTES("Notes"),
     RECORDED("Recorded"),
     BLOCKED("Spam")
 }
@@ -124,6 +130,7 @@ fun RecentsScreen(
     callLogs: List<CallLogEntity>,
     contacts: List<ContactEntity>,
     isDefaultDialer: Boolean,
+    canShowIncomingOverDisplay: Boolean = true,
     recordings: List<CallRecordingEntity>,
     playingRecordingId: Long?,
     hasCallLogPermission: Boolean,
@@ -134,10 +141,12 @@ fun RecentsScreen(
     onCallBack: (String) -> Unit,
     onOpenAddContact: (phoneNumber: String, prefillName: String) -> Unit,
     onRequestDefaultDialer: () -> Unit,
+    onEnableIncomingOverDisplay: () -> Unit = {},
     onTogglePlayback: (CallRecordingEntity) -> Unit,
     onDeleteRecording: (CallRecordingEntity) -> Unit,
     onReportSpam: (String) -> Unit,
     onDeleteLog: (Long) -> Unit,
+    onSaveCallNote: (Long, String) -> Unit = { _, _ -> },
     onSyncSystemCallLog: () -> Unit,
     onOpenEncryptedSync: () -> Unit,
     onOpenRecordingSettings: () -> Unit,
@@ -146,6 +155,7 @@ fun RecentsScreen(
 ) {
     var selectedFilter by remember { mutableStateOf(RecentsFilter.ALL) }
     var historyTargetLog by remember { mutableStateOf<CallLogEntity?>(null) }
+    var noteTargetLog by remember { mutableStateOf<CallLogEntity?>(null) }
     var expandedLogId by remember { mutableStateOf<Long?>(null) }
     var openSwipeLogId by remember { mutableStateOf<Long?>(null) }
     val recordingsById = remember(recordings) { recordings.associateBy { it.id } }
@@ -164,6 +174,7 @@ fun RecentsScreen(
         when (selectedFilter) {
             RecentsFilter.ALL -> callLogs
             RecentsFilter.MISSED -> callLogs.filter { it.direction == CallDirection.MISSED }
+            RecentsFilter.NOTES -> callLogs.filter { it.quickNote.isNotBlank() }
             RecentsFilter.RECORDED -> callLogs.filter { it.recordingId != null }
             RecentsFilter.BLOCKED -> callLogs.filter {
                 it.direction == CallDirection.BLOCKED || it.spamScore >= 50
@@ -303,6 +314,57 @@ fun RecentsScreen(
                                 modifier = Modifier.testTag("recents_set_default_dialer_button")
                             ) {
                                 Text("Enable")
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (!canShowIncomingOverDisplay) {
+                item {
+                    Surface(
+                        shape = RoundedCornerShape(16.dp),
+                        color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.45f),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .border(
+                                1.dp,
+                                MaterialTheme.colorScheme.secondary.copy(alpha = 0.35f),
+                                RoundedCornerShape(16.dp)
+                            )
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Row(
+                                modifier = Modifier.weight(1f),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.NotificationsActive,
+                                    contentDescription = "Incoming call over display",
+                                    tint = MaterialTheme.colorScheme.primary
+                                )
+                                Column {
+                                    Text(
+                                        text = "Show Incoming Calls Over Display",
+                                        style = MaterialTheme.typography.labelLarge
+                                    )
+                                    Text(
+                                        text = "Wake screen & pop incoming calls over lock screen and apps",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                            TextButton(
+                                onClick = onEnableIncomingOverDisplay,
+                                modifier = Modifier.testTag("recents_enable_over_display_button")
+                            ) {
+                                Text("Allow")
                             }
                         }
                     }
@@ -553,6 +615,7 @@ fun RecentsScreen(
                             }
                         },
                         onOpenHistory = { historyTargetLog = log },
+                        onOpenNote = { noteTargetLog = log },
                         onCallBack = { onCallBack(log.phoneNumber) },
                         onAddNewContact = { onOpenAddContact(log.phoneNumber, log.resolvedContactName) },
                         onPlayRecording = { linkedRec?.let(onTogglePlayback) },
@@ -596,7 +659,26 @@ fun RecentsScreen(
             },
             onTogglePlayback = onTogglePlayback,
             onReportSpam = onReportSpam,
-            onDeleteLog = onDeleteLog
+            onDeleteLog = onDeleteLog,
+            onEditNote = { entry -> noteTargetLog = entry }
+        )
+    }
+
+    noteTargetLog?.let { targetLog ->
+        val liveLog = callLogs.firstOrNull { it.id == targetLog.id } ?: targetLog
+        val logDigits = liveLog.phoneNumber.filter { it.isDigit() }
+        val matched = liveLog.contactInfo.contactId?.let { contactsById[it] }
+            ?: contactsByDigits[logDigits]
+        val callerLabel = matched?.displayName?.ifBlank { liveLog.resolvedContactName }
+            ?: liveLog.resolvedContactName.ifBlank { liveLog.phoneNumber }
+        QuickCallNoteDialog(
+            log = liveLog,
+            callerLabel = callerLabel,
+            onSave = { updatedNote ->
+                onSaveCallNote(liveLog.id, updatedNote)
+                noteTargetLog = null
+            },
+            onDismiss = { noteTargetLog = null }
         )
     }
 }
@@ -614,6 +696,7 @@ private fun SwipeableCallLogItem(
     onSwipeOpenChange: (Boolean) -> Unit,
     onSwipeStart: () -> Unit,
     onOpenHistory: () -> Unit,
+    onOpenNote: () -> Unit,
     onCallBack: () -> Unit,
     onAddNewContact: () -> Unit,
     onPlayRecording: () -> Unit,
@@ -738,6 +821,7 @@ private fun SwipeableCallLogItem(
                     }
                 },
                 onOpenHistory = onOpenHistory,
+                onOpenNote = onOpenNote,
                 onCallBack = onCallBack,
                 onAddNewContact = onAddNewContact,
                 onPlayRecording = onPlayRecording,
@@ -759,6 +843,7 @@ private fun CallLogCard(
     isExpanded: Boolean,
     onCardClick: () -> Unit,
     onOpenHistory: () -> Unit,
+    onOpenNote: () -> Unit,
     onCallBack: () -> Unit,
     onAddNewContact: () -> Unit,
     onPlayRecording: () -> Unit,
@@ -917,6 +1002,37 @@ private fun CallLogCard(
                             )
                         }
                     }
+                    if (log.quickNote.isNotBlank() && !isExpanded) {
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f),
+                            modifier = Modifier
+                                .padding(top = 3.dp)
+                                .clip(RoundedCornerShape(8.dp))
+                                .clickable(onClick = onOpenNote)
+                                .testTag("recent_call_note_preview_${log.id}")
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.EditNote,
+                                    contentDescription = "Call note",
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(13.dp)
+                                )
+                                Text(
+                                    text = log.quickNote,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+                    }
                 }
 
                 IconButton(
@@ -1013,11 +1129,60 @@ private fun CallLogCard(
                         }
                     }
 
-                    // Action Buttons Row (Add, History, Play Recording if present, Spam Shield, Delete)
+                    // Full Call Note Card inside expanded view (tap to edit)
+                    if (log.quickNote.isNotBlank()) {
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(12.dp))
+                                .clickable(onClick = onOpenNote)
+                                .testTag("expanded_call_note_card_${log.id}")
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 10.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.EditNote,
+                                    contentDescription = "Call note",
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Text(
+                                    text = log.quickNote,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                Icon(
+                                    imageVector = Icons.Filled.Edit,
+                                    contentDescription = "Edit call note",
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(15.dp)
+                                )
+                            }
+                        }
+                    }
+
+                    // Action Buttons Row (Note, Add, History, Play Recording if present, Spam Shield, Delete)
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
+                        ExpandedNumberActionTile(
+                            icon = if (log.quickNote.isNotBlank()) Icons.Filled.EditNote else Icons.AutoMirrored.Filled.NoteAdd,
+                            label = if (log.quickNote.isNotBlank()) "Edit Note" else "Note",
+                            tint = MaterialTheme.colorScheme.primary,
+                            onClick = onOpenNote,
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("note_recent_log_${log.id}")
+                        )
                         if (isUnknownContact && log.phoneNumber.isNotBlank()) {
                             ExpandedNumberActionTile(
                                 icon = Icons.Filled.PersonAdd,
@@ -1051,7 +1216,7 @@ private fun CallLogCard(
                         }
                         ExpandedNumberActionTile(
                             icon = Icons.Filled.Shield,
-                            label = "Spam Shield",
+                            label = "Spam",
                             tint = SpamWarningCoral,
                             onClick = onReportSpam,
                             modifier = Modifier

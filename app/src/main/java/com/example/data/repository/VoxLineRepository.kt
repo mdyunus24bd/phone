@@ -32,6 +32,7 @@ import com.example.data.local.VoxLineDatabase
 import com.example.data.preferences.UserPreferencesRepository
 import com.example.data.preferences.VoxLineSettings
 import com.example.security.CryptoVault
+import com.example.telecom.SpamAnalyzer
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.withContext
@@ -492,6 +493,9 @@ class VoxLineRepository(
 
     suspend fun updateCallLog(entry: CallLogEntity) = db.callHistoryDao().update(entry)
 
+    suspend fun updateCallLogNote(id: Long, note: String) =
+        db.callHistoryDao().updateQuickNote(id, note.trim())
+
     suspend fun deleteCallLog(id: Long) = db.callHistoryDao().deleteById(id)
 
     suspend fun insertRecording(recording: CallRecordingEntity): Long = db.callRecordingDao().insert(recording)
@@ -522,6 +526,30 @@ class VoxLineRepository(
     suspend fun deleteSpamRule(rule: SpamRuleEntity) = db.spamRuleDao().delete(rule)
 
     suspend fun incrementSpamRuleMatch(id: Long) = db.spamRuleDao().incrementMatches(id)
+
+    /**
+     * Adds [phoneNumber] to the auto-reject Blocked Numbers list if it is not already blocked.
+     * Returns true if added, or false if blank or already matched by an existing auto-block rule.
+     */
+    suspend fun blockNumber(phoneNumber: String, label: String): Boolean {
+        val clean = phoneNumber.trim()
+        if (clean.isEmpty()) return false
+        val existingRules = db.spamRuleDao().getAllSnapshot()
+        if (SpamAnalyzer.findBlockingRule(clean, existingRules) != null) {
+            return false
+        }
+        db.spamRuleDao().upsert(
+            SpamRuleEntity(
+                pattern = clean,
+                label = label.trim().ifBlank { "Blocked Number" },
+                riskScore = 100,
+                autoBlock = true
+            )
+        )
+        return true
+    }
+
+    suspend fun clearAllBlockedNumbers() = db.spamRuleDao().deleteAllAutoBlocked()
 
     /**
      * Auto-imports and synchronizes real contacts from the Android device's ContactsContract
@@ -807,6 +835,7 @@ class VoxLineRepository(
                             put("spamScore", l.spamScore)
                             put("spamReason", l.spamReason)
                             put("deviceTag", l.deviceTag.ifBlank { deviceName })
+                            put("quickNote", l.quickNote)
                         })
                     }
                 })
@@ -914,7 +943,8 @@ class VoxLineRepository(
                             encryptedTransport = o.optBoolean("encryptedTransport", false),
                             spamScore = o.optInt("spamScore", 0),
                             spamReason = o.optString("spamReason", ""),
-                            deviceTag = o.optString("deviceTag", "Synced Device")
+                            deviceTag = o.optString("deviceTag", "Synced Device"),
+                            quickNote = o.optString("quickNote", "")
                         )
                     )
                 }

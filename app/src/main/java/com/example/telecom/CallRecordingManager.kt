@@ -1,15 +1,23 @@
 package com.example.telecom
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.content.Context
 import android.content.pm.PackageManager
+import android.media.AudioAttributes
+import android.media.AudioFormat
+import android.media.AudioManager
+import android.media.AudioRecord
+import android.media.AudioRecordingConfiguration
 import android.media.MediaPlayer
 import android.media.MediaRecorder
 import android.net.Uri
 import android.os.Build
+import android.os.Process
 import androidx.core.content.ContextCompat
 import com.example.security.CryptoVault
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -20,6 +28,9 @@ import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.math.abs
 
 data class FinishedRecording(
     val fileName: String,
@@ -38,25 +49,55 @@ sealed class CallRecordingState {
         val callerLabel: String,
         val networkType: String,
         val isAutoTriggered: Boolean,
-        val audioSourceLabel: String
+        val audioSourceLabel: String,
+        val isSilencedBySystem: Boolean = false
     ) : CallRecordingState()
     data object Saving : CallRecordingState()
     data class Error(val message: String) : CallRecordingState()
 }
 
+private data class AudioSourceCandidate(
+    val source: Int,
+    val label: String,
+    val preferredRates: List<Int>
+)
+
+private data class OpenedCaptureSession(
+    val audioRecord: AudioRecord,
+    val source: Int,
+    val sourceLabel: String,
+    val sampleRate: Int,
+    val bufferSizeShorts: Int,
+    val preCapturedChunks: List<ShortArray>,
+    val isSilenced: Boolean,
+    val hasNonZeroSignal: Boolean
+)
+
 /**
- * Dedicated CallRecordingManager built on Android's MediaRecorder API to handle
- * call recording safely on Dispatchers.IO, backed by a microphone-typed Foreground
- * Service and saving finalized .m4a audio files directly into the app's private
- * internal storage (`context.filesDir/call_recordings`).
+ * Real-time CallRecordingManager powered by Android's AudioRecord + MediaCodec (AAC .m4a)
+ * with WAV fallback, microphone Foreground Service readiness synchronization, active
+ * multi-source probing, Android 10+ `isClientSilenced` detection, and adaptive two-way
+ * voice gain control (AGC).
  */
 class CallRecordingManager(
     private val context: Context,
     private val cryptoVault: CryptoVault
 ) {
     private val recorderMutex = Mutex()
-    private var mediaRecorder: MediaRecorder? = null
-    private var activeRecordingFile: File? = null
+    private val captureRunning = AtomicBoolean(false)
+    private val callbackExecutor = Executors.newSingleThreadExecutor()
+
+    @Volatile
+    private var activeAudioRecord: AudioRecord? = null
+    @Volatile
+    private var activeRecordingCallback: AudioManager.AudioRecordingCallback? = null
+    @Volatile
+    private var activeWriter: PcmAudioFileWriter? = null
+    @Volatile
+    private var captureThread: Thread? = null
+
+    private var activeCaptureFile: File? = null
+    private var activeFileExtension: String = "m4a"
     private var startedAtMs: Long = 0L
 
     private var player: MediaPlayer? = null
@@ -64,6 +105,12 @@ class CallRecordingManager(
 
     private val _recordingState = MutableStateFlow<CallRecordingState>(CallRecordingState.Idle)
     val recordingState: StateFlow<CallRecordingState> = _recordingState.asStateFlow()
+
+    private val _liveAudioLevel = MutableStateFlow(0f)
+    val liveAudioLevel: StateFlow<Float> = _liveAudioLevel.asStateFlow()
+
+    private val _isAudioSilenced = MutableStateFlow(false)
+    val isAudioSilenced: StateFlow<Boolean> = _isAudioSilenced.asStateFlow()
 
     val isRecording: Boolean
         get() = _recordingState.value is CallRecordingState.Recording
@@ -73,6 +120,14 @@ class CallRecordingManager(
             context,
             Manifest.permission.RECORD_AUDIO
         ) == PackageManager.PERMISSION_GRANTED
+    }
+
+    fun isCallAudioHelperEnabled(): Boolean {
+        return CallRecordingAccessibilityService.isServiceEnabled(context)
+    }
+
+    fun openCallAudioHelperSettings(): Boolean {
+        return CallRecordingAccessibilityService.openAccessibilitySettings(context)
     }
 
     /**
@@ -90,17 +145,12 @@ class CallRecordingManager(
         }
     }
 
-    /**
-     * Human-readable App Internal Storage folder displayed in settings and recording cards.
-     */
     fun internalStorageFolderLabel(): String = "Internal Storage / $INTERNAL_RECORDINGS_DIR"
 
     /**
-     * Starts call recording using Android's MediaRecorder API, writing audio directly into
-     * the app's private internal storage directory and keeping capture alive with
-     * CallRecordingForegroundService (microphone foreground service).
-     * Automatically falls back from VOICE_COMMUNICATION to MIC if the device rejects
-     * the voice communication audio source.
+     * Starts call recording after waiting for the microphone Foreground Service to be active,
+     * then probes Android audio sources to pick one that delivers real non-silenced audio
+     * (never silently sticking on a zero-filled VOICE_COMMUNICATION stream).
      */
     suspend fun startBackgroundRecording(
         callerLabel: String,
@@ -114,91 +164,475 @@ class CallRecordingManager(
         }
 
         _recordingState.value = CallRecordingState.Starting
+        _liveAudioLevel.value = 0f
+        _isAudioSilenced.value = false
 
         withContext(Dispatchers.IO) {
-            stopRecorderResourcesLocked(discardActiveFile = true)
+            stopCaptureResourcesLocked(discardActiveFile = true)
 
-            // Start microphone foreground service so recording continues reliably during calls
-            CallRecordingForegroundService.start(
-                context = context,
-                callerLabel = callerLabel,
-                networkType = networkType
-            )
-
-            val recordingsDir = internalRecordingsDir()
-            val candidateSources = listOf(
-                MediaRecorder.AudioSource.VOICE_COMMUNICATION to "VOICE_COMM",
-                MediaRecorder.AudioSource.MIC to "MIC"
-            )
-
-            var lastError: Exception? = null
-            for ((audioSource, sourceLabel) in candidateSources) {
-                val captureFile = File(recordingsDir, "active_capture_${System.currentTimeMillis()}.m4a")
-                val candidate = createMediaRecorder()
-                try {
-                    candidate.apply {
-                        setAudioSource(audioSource)
-                        setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
-                        setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
-                        setAudioSamplingRate(44100)
-                        setAudioEncodingBitRate(96000)
-                        setOutputFile(captureFile.absolutePath)
-                        setOnErrorListener { _, what, extra ->
-                            _recordingState.value = CallRecordingState.Error(
-                                "MediaRecorder error ($what/$extra)"
-                            )
-                            CallRecordingForegroundService.stop(context)
-                        }
-                        prepare()
-                        start()
-                    }
-                    mediaRecorder = candidate
-                    activeRecordingFile = captureFile
-                    startedAtMs = System.currentTimeMillis()
-                    _recordingState.value = CallRecordingState.Recording(
-                        startedAtMs = startedAtMs,
-                        callerLabel = callerLabel,
-                        networkType = networkType,
-                        isAutoTriggered = isAutoTriggered,
-                        audioSourceLabel = sourceLabel
-                    )
-                    return@withContext Result.success(sourceLabel)
-                } catch (e: Exception) {
-                    lastError = e
-                    runCatching { candidate.reset() }
-                    runCatching { candidate.release() }
-                    runCatching { captureFile.delete() }
-                }
+            // Wait for telephony audio routing to settle when auto-triggered right on call connect
+            if (isAutoTriggered) {
+                delay(450L)
             }
 
-            CallRecordingForegroundService.stop(context)
-            val failure = lastError ?: IllegalStateException("Unable to initialize MediaRecorder")
-            _recordingState.value = CallRecordingState.Error(
-                failure.localizedMessage ?: "Audio device unavailable"
+            // Ensure microphone Foreground Service is promoted BEFORE opening AudioRecord
+            // (prevents Android 11–15 from silencing capture due to FGS startup race)
+            CallRecordingForegroundService.startAndAwaitReady(
+                context = context,
+                callerLabel = callerLabel,
+                networkType = networkType,
+                timeoutMs = 1500L
             )
-            Result.failure(failure)
+
+            val session = probeAndOpenBestAudioSource()
+            if (session == null) {
+                CallRecordingForegroundService.stop(context)
+                val failure = IllegalStateException("No compatible audio input source available")
+                _recordingState.value = CallRecordingState.Error(
+                    failure.localizedMessage ?: "Audio device unavailable"
+                )
+                return@withContext Result.failure(failure)
+            }
+
+            val recordingsDir = internalRecordingsDir()
+            val timestamp = System.currentTimeMillis()
+            val writer: PcmAudioFileWriter = try {
+                val m4aFile = File(recordingsDir, "active_capture_$timestamp.m4a")
+                AacM4aPcmWriter(outputFile = m4aFile, sampleRate = session.sampleRate)
+            } catch (_: Exception) {
+                val wavFile = File(recordingsDir, "active_capture_$timestamp.wav")
+                WavPcmWriter(outputFile = wavFile, sampleRate = session.sampleRate)
+            }
+
+            activeAudioRecord = session.audioRecord
+            activeWriter = writer
+            activeCaptureFile = writer.outputFile
+            activeFileExtension = writer.fileExtension
+            startedAtMs = System.currentTimeMillis()
+            _isAudioSilenced.value = session.isSilenced
+
+            registerLiveSilencedMonitor(session.audioRecord)
+
+            // Adaptive gain boosts quiet far-end earpiece/speaker pickup on mic/voice-recog sources
+            val gainProcessor = AdaptiveCallVoiceGain(
+                maxGain = if (session.source == MediaRecorder.AudioSource.VOICE_CALL) 1.8f else 4.5f,
+                targetPeak = 18_000f,
+                noiseGatePeak = 20
+            )
+
+            captureRunning.set(true)
+            val worker = Thread({
+                Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO)
+                runCaptureLoop(
+                    audioRecord = session.audioRecord,
+                    writer = writer,
+                    sampleRate = session.sampleRate,
+                    bufferSizeShorts = session.bufferSizeShorts,
+                    preCapturedChunks = session.preCapturedChunks,
+                    gainProcessor = gainProcessor
+                )
+            }, "VoxLineCallAudioCapture")
+
+            captureThread = worker
+            worker.start()
+
+            _recordingState.value = CallRecordingState.Recording(
+                startedAtMs = startedAtMs,
+                callerLabel = callerLabel,
+                networkType = networkType,
+                isAutoTriggered = isAutoTriggered,
+                audioSourceLabel = session.sourceLabel,
+                isSilencedBySystem = session.isSilenced
+            )
+
+            Result.success(session.sourceLabel)
         }
     }
 
     /**
-     * Stops the active MediaRecorder session on a background thread, stops the foreground
-     * service, and finalizes the .m4a audio recording in the app's internal storage.
+     * Tests candidate Android audio sources in priority order using non-blocking short probes.
+     * Immediately selects the first source that is NOT silenced by Android AudioPolicyService
+     * and delivers real non-zero PCM audio.
+     */
+    @SuppressLint("MissingPermission")
+    private fun probeAndOpenBestAudioSource(): OpenedCaptureSession? {
+        val helperEnabled = isCallAudioHelperEnabled()
+        val candidates = buildCandidateSources(helperEnabled)
+
+        var bestFallbackSpec: Triple<Int, String, Int>? = null
+        var bestFallbackPriority = Int.MAX_VALUE
+
+        for ((index, candidate) in candidates.withIndex()) {
+            for (rate in candidate.preferredRates) {
+                val probed = tryProbeAudioSource(
+                    source = candidate.source,
+                    label = candidate.label,
+                    sampleRate = rate
+                ) ?: continue
+
+                // Record the highest-priority source that initialized cleanly as a fallback
+                if (index < bestFallbackPriority) {
+                    bestFallbackPriority = index
+                    bestFallbackSpec = Triple(candidate.source, candidate.label, rate)
+                }
+
+                // If Android did NOT silence this source AND we got real non-zero PCM, lock onto it!
+                if (!probed.isSilenced && probed.hasNonZeroSignal) {
+                    return probed
+                }
+
+                // Otherwise close the probe and try the next candidate source
+                releaseAudioRecordSafe(probed.audioRecord)
+                break // No need to test lower sample rates for the same silenced source
+            }
+        }
+
+        // Fallback: no candidate produced non-zero signal during the brief probe (e.g., quiet room
+        // or Android 10+ silencing all non-a11y apps during MODE_IN_CALL). Re-open best fallback
+        // (preferring VOICE_RECOGNITION / MIC) so recording still runs and can auto-recover mid-call.
+        val fallback = bestFallbackSpec ?: return null
+        return openAudioRecordDirect(
+            source = fallback.first,
+            label = fallback.second,
+            sampleRate = fallback.third
+        )
+    }
+
+    private fun buildCandidateSources(helperEnabled: Boolean): List<AudioSourceCandidate> {
+        val list = mutableListOf<AudioSourceCandidate>()
+        // 1. Direct two-way telephony bus (works natively on OEM ROMs that expose it)
+        list += AudioSourceCandidate(
+            source = MediaRecorder.AudioSource.VOICE_CALL,
+            label = "VOICE_CALL",
+            preferredRates = listOf(16_000, 8_000, 44_100, 48_000)
+        )
+        // 2. VOICE_RECOGNITION: primary Android 10–15 non-privacy-sensitive two-way capture source
+        //    (explicitly permitted during MODE_IN_CALL when Call Audio Helper is active, and avoids
+        //    aggressive VoIP echo cancellation that erases the remote caller)
+        list += AudioSourceCandidate(
+            source = MediaRecorder.AudioSource.VOICE_RECOGNITION,
+            label = "VOICE_RECOG",
+            preferredRates = listOf(16_000, 44_100, 48_000, 8_000)
+        )
+        if (!helperEnabled) {
+            // 3. Raw MIC with setPrivacySensitive(false) often succeeds on OEMs that block VOICE_COMM
+            list += AudioSourceCandidate(
+                source = MediaRecorder.AudioSource.MIC,
+                label = "MIC",
+                preferredRates = listOf(44_100, 16_000, 48_000)
+            )
+            list += AudioSourceCandidate(
+                source = MediaRecorder.AudioSource.VOICE_COMMUNICATION,
+                label = "VOICE_COMM",
+                preferredRates = listOf(16_000, 44_100, 48_000)
+            )
+        } else {
+            list += AudioSourceCandidate(
+                source = MediaRecorder.AudioSource.VOICE_COMMUNICATION,
+                label = "VOICE_COMM",
+                preferredRates = listOf(16_000, 44_100, 48_000)
+            )
+            list += AudioSourceCandidate(
+                source = MediaRecorder.AudioSource.MIC,
+                label = "MIC",
+                preferredRates = listOf(44_100, 16_000, 48_000)
+            )
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            list += AudioSourceCandidate(
+                source = MediaRecorder.AudioSource.UNPROCESSED,
+                label = "UNPROCESSED",
+                preferredRates = listOf(44_100, 16_000, 48_000)
+            )
+        }
+        list += AudioSourceCandidate(
+            source = MediaRecorder.AudioSource.CAMCORDER,
+            label = "CAMCORDER",
+            preferredRates = listOf(44_100, 16_000)
+        )
+        list += AudioSourceCandidate(
+            source = MediaRecorder.AudioSource.DEFAULT,
+            label = "DEFAULT",
+            preferredRates = listOf(44_100, 16_000, 8_000)
+        )
+        return list
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun createConfiguredAudioRecord(
+        source: Int,
+        sampleRate: Int
+    ): Pair<AudioRecord, Int>? {
+        val minBytes = AudioRecord.getMinBufferSize(
+            sampleRate,
+            AudioFormat.CHANNEL_IN_MONO,
+            AudioFormat.ENCODING_PCM_16BIT
+        )
+        if (minBytes <= 0) return null
+
+        val bufferBytes = maxOf(minBytes * 3, sampleRate / 5 * 2) // >= 200ms PCM16 mono
+        val format = AudioFormat.Builder()
+            .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+            .setSampleRate(sampleRate)
+            .setChannelMask(AudioFormat.CHANNEL_IN_MONO)
+            .build()
+
+        val builder = AudioRecord.Builder()
+            .setAudioSource(source)
+            .setAudioFormat(format)
+            .setBufferSizeInBytes(bufferBytes)
+
+        // Android 11+: opt out of privacy-sensitive exclusivity so Android does not auto-silence
+        // this stream during concurrent active calls
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            runCatching { builder.setPrivacySensitive(false) }
+        }
+
+        val record = try {
+            builder.build()
+        } catch (_: Throwable) {
+            return null
+        }
+
+        if (record.state != AudioRecord.STATE_INITIALIZED) {
+            releaseAudioRecordSafe(record)
+            return null
+        }
+
+        val readChunkShorts = (sampleRate / 25).coerceIn(320, 2048) // ~40ms frames
+        return record to readChunkShorts
+    }
+
+    private fun tryProbeAudioSource(
+        source: Int,
+        label: String,
+        sampleRate: Int
+    ): OpenedCaptureSession? {
+        val (record, chunkShorts) = createConfiguredAudioRecord(source, sampleRate) ?: return null
+        return try {
+            record.startRecording()
+            if (record.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
+                releaseAudioRecordSafe(record)
+                return null
+            }
+
+            val probeChunks = mutableListOf<ShortArray>()
+            val tempBuf = ShortArray(chunkShorts)
+            var peakAmplitude = 0
+            var silencedByApi = false
+            val deadlineMs = System.currentTimeMillis() + 260L
+
+            while (System.currentTimeMillis() < deadlineMs) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    if (record.activeRecordingConfiguration?.isClientSilenced == true) {
+                        silencedByApi = true
+                        break
+                    }
+                }
+                val read = record.read(tempBuf, 0, tempBuf.size, AudioRecord.READ_NON_BLOCKING)
+                if (read > 0) {
+                    val copy = tempBuf.copyOf(read)
+                    probeChunks.add(copy)
+                    for (i in 0 until read) {
+                        val a = abs(copy[i].toInt())
+                        if (a > peakAmplitude) peakAmplitude = a
+                    }
+                    if (peakAmplitude > 0) {
+                        // Confirmed live non-zero audio from this source
+                        break
+                    }
+                } else if (read < 0) {
+                    releaseAudioRecordSafe(record)
+                    return null
+                } else {
+                    Thread.sleep(20L)
+                }
+            }
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && !silencedByApi) {
+                silencedByApi = record.activeRecordingConfiguration?.isClientSilenced == true
+            }
+
+            OpenedCaptureSession(
+                audioRecord = record,
+                source = source,
+                sourceLabel = label,
+                sampleRate = sampleRate,
+                bufferSizeShorts = chunkShorts,
+                preCapturedChunks = probeChunks,
+                isSilenced = silencedByApi,
+                hasNonZeroSignal = peakAmplitude > 0
+            )
+        } catch (_: Throwable) {
+            releaseAudioRecordSafe(record)
+            null
+        }
+    }
+
+    private fun openAudioRecordDirect(
+        source: Int,
+        label: String,
+        sampleRate: Int
+    ): OpenedCaptureSession? {
+        val (record, chunkShorts) = createConfiguredAudioRecord(source, sampleRate) ?: return null
+        return try {
+            record.startRecording()
+            if (record.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
+                releaseAudioRecordSafe(record)
+                return null
+            }
+            val silenced = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                record.activeRecordingConfiguration?.isClientSilenced == true
+            } else {
+                false
+            }
+            OpenedCaptureSession(
+                audioRecord = record,
+                source = source,
+                sourceLabel = label,
+                sampleRate = sampleRate,
+                bufferSizeShorts = chunkShorts,
+                preCapturedChunks = emptyList(),
+                isSilenced = silenced,
+                hasNonZeroSignal = false
+            )
+        } catch (_: Throwable) {
+            releaseAudioRecordSafe(record)
+            null
+        }
+    }
+
+    private fun registerLiveSilencedMonitor(audioRecord: AudioRecord) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return
+        val sessionId = audioRecord.audioSessionId
+        val callback = object : AudioManager.AudioRecordingCallback() {
+            override fun onRecordingConfigChanged(configs: MutableList<AudioRecordingConfiguration>?) {
+                val mine = configs?.firstOrNull { it.clientAudioSessionId == sessionId } ?: return
+                updateSilencedFlag(mine.isClientSilenced)
+            }
+        }
+        activeRecordingCallback = callback
+        runCatching {
+            audioRecord.registerAudioRecordingCallback(callbackExecutor, callback)
+        }
+    }
+
+    private fun updateSilencedFlag(silenced: Boolean) {
+        if (_isAudioSilenced.value == silenced) return
+        _isAudioSilenced.value = silenced
+        val current = _recordingState.value
+        if (current is CallRecordingState.Recording) {
+            _recordingState.value = current.copy(isSilencedBySystem = silenced)
+        }
+    }
+
+    private fun runCaptureLoop(
+        audioRecord: AudioRecord,
+        writer: PcmAudioFileWriter,
+        sampleRate: Int,
+        bufferSizeShorts: Int,
+        preCapturedChunks: List<ShortArray>,
+        gainProcessor: AdaptiveCallVoiceGain
+    ) {
+        var consecutiveZeroSamples = 0L
+        val silenceDetectThresholdSamples = sampleRate * 2L // 2.0 seconds of strictly all-zero PCM
+        var lastMeterUpdateMs = 0L
+
+        try {
+            // Write any audio captured during the probe window so no speech is clipped at the start
+            for (chunk in preCapturedChunks) {
+                val level = gainProcessor.processInPlace(chunk, chunk.size)
+                writer.writePcm(chunk, chunk.size)
+                if (level > 0f) {
+                    _liveAudioLevel.value = level
+                    consecutiveZeroSamples = 0L
+                }
+            }
+
+            val readBuffer = ShortArray(bufferSizeShorts)
+            while (captureRunning.get()) {
+                val readCount = audioRecord.read(
+                    readBuffer,
+                    0,
+                    readBuffer.size,
+                    AudioRecord.READ_BLOCKING
+                )
+                if (readCount <= 0) {
+                    if (!captureRunning.get()) break
+                    if (readCount == AudioRecord.ERROR_DEAD_OBJECT ||
+                        readCount == AudioRecord.ERROR_INVALID_OPERATION
+                    ) {
+                        break
+                    }
+                    continue
+                }
+
+                var rawPeak = 0
+                for (i in 0 until readCount) {
+                    val a = abs(readBuffer[i].toInt())
+                    if (a > rawPeak) rawPeak = a
+                }
+
+                val isApiSilenced = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
+                    audioRecord.activeRecordingConfiguration?.isClientSilenced == true
+
+                if (rawPeak == 0) {
+                    consecutiveZeroSamples += readCount.toLong()
+                    if (isApiSilenced || consecutiveZeroSamples >= silenceDetectThresholdSamples) {
+                        updateSilencedFlag(true)
+                    }
+                } else {
+                    consecutiveZeroSamples = 0L
+                    if (!isApiSilenced) {
+                        updateSilencedFlag(false)
+                    }
+                }
+
+                val level = gainProcessor.processInPlace(readBuffer, readCount)
+                writer.writePcm(readBuffer, readCount)
+
+                val now = System.currentTimeMillis()
+                if (now - lastMeterUpdateMs >= 110L) {
+                    lastMeterUpdateMs = now
+                    _liveAudioLevel.value = if (rawPeak == 0) 0f else level
+                }
+            }
+        } catch (_: Throwable) {
+        } finally {
+            _liveAudioLevel.value = 0f
+            runCatching { writer.finishAndClose() }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                activeRecordingCallback?.let { cb ->
+                    runCatching { audioRecord.unregisterAudioRecordingCallback(cb) }
+                }
+            }
+            activeRecordingCallback = null
+            releaseAudioRecordSafe(audioRecord)
+        }
+    }
+
+    /**
+     * Stops the active capture thread cleanly, flushes the AAC/WAV file, stops the foreground
+     * service, and saves the finalized audio recording into the app's internal storage.
      */
     suspend fun stopAndSaveRecording(
         phoneNumber: String,
         networkType: String
     ): Result<FinishedRecording> = recorderMutex.withLock {
         withContext(Dispatchers.IO) {
-            val rawFile = activeRecordingFile
+            val rawFile = activeCaptureFile
+            val ext = activeFileExtension.ifBlank { "m4a" }
             if (rawFile == null) {
                 CallRecordingForegroundService.stop(context)
                 _recordingState.value = CallRecordingState.Idle
+                _liveAudioLevel.value = 0f
+                _isAudioSilenced.value = false
                 return@withContext Result.failure(IllegalStateException("No active call recording"))
             }
 
             _recordingState.value = CallRecordingState.Saving
             val durationSec = ((System.currentTimeMillis() - startedAtMs) / 1000L).coerceAtLeast(1L)
-            stopRecorderResourcesLocked(discardActiveFile = false)
+            stopCaptureResourcesLocked(discardActiveFile = false)
             CallRecordingForegroundService.stop(context)
 
             try {
@@ -214,7 +648,7 @@ class CallRecordingManager(
                     .take(18)
                     .ifBlank { "Unknown" }
                 val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-                val fileName = "VoxLine_${networkType}_${safePeer}_${timestamp}.m4a"
+                val fileName = "VoxLine_${networkType}_${safePeer}_${timestamp}.$ext"
                 val destFile = File(internalRecordingsDir(), fileName)
 
                 val finalFile = if (rawFile.renameTo(destFile)) {
@@ -256,39 +690,46 @@ class CallRecordingManager(
      */
     suspend fun cancelRecording() = recorderMutex.withLock {
         withContext(Dispatchers.IO) {
-            stopRecorderResourcesLocked(discardActiveFile = true)
+            stopCaptureResourcesLocked(discardActiveFile = true)
             CallRecordingForegroundService.stop(context)
             _recordingState.value = CallRecordingState.Idle
         }
     }
 
-    private fun createMediaRecorder(): MediaRecorder {
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            MediaRecorder(context)
-        } else {
-            @Suppress("DEPRECATION")
-            MediaRecorder()
+    private fun stopCaptureResourcesLocked(discardActiveFile: Boolean) {
+        captureRunning.set(false)
+        val record = activeAudioRecord
+        if (record != null) {
+            runCatching { record.stop() }
         }
+        val worker = captureThread
+        if (worker != null && worker !== Thread.currentThread()) {
+            runCatching { worker.join(2500L) }
+        }
+        captureThread = null
+        activeAudioRecord = null
+        activeRecordingCallback = null
+
+        val writer = activeWriter
+        activeWriter = null
+        if (discardActiveFile) {
+            runCatching { writer?.abortAndDelete() }
+            runCatching { activeCaptureFile?.delete() }
+        } else {
+            runCatching { writer?.finishAndClose() }
+        }
+        activeCaptureFile = null
+        _liveAudioLevel.value = 0f
+        _isAudioSilenced.value = false
     }
 
-    private fun stopRecorderResourcesLocked(discardActiveFile: Boolean) {
-        try {
-            mediaRecorder?.stop()
-        } catch (_: Exception) {
+    private fun releaseAudioRecordSafe(record: AudioRecord) {
+        runCatching {
+            if (record.recordingState == AudioRecord.RECORDSTATE_RECORDING) {
+                record.stop()
+            }
         }
-        try {
-            mediaRecorder?.reset()
-        } catch (_: Exception) {
-        }
-        try {
-            mediaRecorder?.release()
-        } catch (_: Exception) {
-        }
-        mediaRecorder = null
-        if (discardActiveFile) {
-            runCatching { activeRecordingFile?.delete() }
-        }
-        activeRecordingFile = null
+        runCatching { record.release() }
     }
 
     suspend fun playRecording(
@@ -312,7 +753,6 @@ class CallRecordingManager(
                 return@withContext Result.success(Unit)
             }
 
-            // Primary lookup: App Internal Storage (context.filesDir/call_recordings)
             val internalFile = File(internalRecordingsDir(), fileName)
             if (internalFile.exists() && internalFile.length() > 0L) {
                 startMediaPlayerFromPath(internalFile.absolutePath, onCompletion)
@@ -327,11 +767,12 @@ class CallRecordingManager(
                 }
             }
 
-            // Backward compatibility for any legacy content:// URI recordings
             if (storageUri.startsWith("content://")) {
                 val uri = Uri.parse(storageUri)
                 withContext(Dispatchers.Main) {
                     val mp = MediaPlayer().apply {
+                        setAudioAttributes(buildPlaybackAudioAttributes())
+                        setVolume(1.0f, 1.0f)
                         setDataSource(context, uri)
                         setOnCompletionListener {
                             stopPlayback()
@@ -352,9 +793,18 @@ class CallRecordingManager(
         }
     }
 
+    private fun buildPlaybackAudioAttributes(): AudioAttributes {
+        return AudioAttributes.Builder()
+            .setUsage(AudioAttributes.USAGE_MEDIA)
+            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+            .build()
+    }
+
     private suspend fun startMediaPlayerFromPath(path: String, onCompletion: () -> Unit) {
         withContext(Dispatchers.Main) {
             val mp = MediaPlayer().apply {
+                setAudioAttributes(buildPlaybackAudioAttributes())
+                setVolume(1.0f, 1.0f)
                 setDataSource(path)
                 setOnCompletionListener {
                     stopPlayback()
@@ -401,8 +851,9 @@ class CallRecordingManager(
 
     fun release() {
         stopPlayback()
-        stopRecorderResourcesLocked(discardActiveFile = true)
+        stopCaptureResourcesLocked(discardActiveFile = true)
         CallRecordingForegroundService.stop(context)
+        callbackExecutor.shutdownNow()
         _recordingState.value = CallRecordingState.Idle
     }
 
