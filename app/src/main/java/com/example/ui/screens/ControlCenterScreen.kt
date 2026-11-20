@@ -122,6 +122,7 @@ fun ControlCenterScreen(
     onRemoveAutoRecordNumber: (String) -> Unit,
     onClearAutoRecordNumbers: () -> Unit,
     onToggleRecordingPlayback: (CallRecordingEntity) -> Unit,
+    onShareRecording: (CallRecordingEntity) -> Unit = {},
     onDeleteRecording: (CallRecordingEntity) -> Unit,
     onSelectRingtone: (String, String) -> Unit,
     onToggleRingtonePreview: (String, Boolean) -> Unit,
@@ -392,6 +393,7 @@ fun ControlCenterScreen(
                             onRemoveAutoRecordNumber = onRemoveAutoRecordNumber,
                             onClearAutoRecordNumbers = onClearAutoRecordNumbers,
                             onTogglePlayback = onToggleRecordingPlayback,
+                            onShareRecording = onShareRecording,
                             onDeleteRecording = onDeleteRecording
                         )
                         ControlTab.RINGTONES -> RingtoneSettingsSection(

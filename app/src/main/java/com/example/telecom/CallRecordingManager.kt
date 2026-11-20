@@ -2,7 +2,9 @@ package com.example.telecom
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.content.ClipData
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.media.AudioAttributes
 import android.media.AudioFormat
@@ -15,6 +17,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Process
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import com.example.security.CryptoVault
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -836,6 +839,88 @@ class CallRecordingManager(
         player = null
         runCatching { activeTempPlaybackFile?.delete() }
         activeTempPlaybackFile = null
+    }
+
+    suspend fun prepareShareableRecording(
+        fileName: String,
+        storageUri: String,
+        encryptedAtRest: Boolean
+    ): Result<Pair<Uri, String>> = withContext(Dispatchers.IO) {
+        return@withContext try {
+            val mimeType = when {
+                fileName.endsWith(".wav", ignoreCase = true) -> "audio/wav"
+                fileName.endsWith(".m4a", ignoreCase = true) ||
+                    fileName.endsWith(".mp4", ignoreCase = true) -> "audio/mp4"
+                else -> "audio/*"
+            }
+            val authority = "${context.packageName}.fileprovider"
+            val safeName = fileName.ifBlank { "call_recording_${System.currentTimeMillis()}.m4a" }
+                .replace(Regex("[^A-Za-z0-9._-]"), "_")
+
+            if (encryptedAtRest) {
+                val encryptedFile = File(legacyEncryptedDir(), fileName)
+                if (!encryptedFile.exists() || encryptedFile.length() <= 0L) {
+                    return@withContext Result.failure(IllegalStateException("Recording file not found"))
+                }
+                val decrypted = cryptoVault.decryptBytes(encryptedFile.readBytes())
+                val shareDir = File(context.cacheDir, "shared_recordings").apply { mkdirs() }
+                val outName = if (safeName.endsWith(".enc", ignoreCase = true)) {
+                    safeName.removeSuffix(".enc")
+                } else {
+                    safeName
+                }
+                val shareFile = File(shareDir, outName)
+                shareFile.writeBytes(decrypted)
+                val uri = FileProvider.getUriForFile(context, authority, shareFile)
+                return@withContext Result.success(uri to mimeType)
+            }
+
+            val internalFile = File(internalRecordingsDir(), fileName)
+            if (internalFile.exists() && internalFile.length() > 0L) {
+                val uri = FileProvider.getUriForFile(context, authority, internalFile)
+                return@withContext Result.success(uri to mimeType)
+            }
+
+            if (storageUri.startsWith("file://")) {
+                val fileFromUri = File(Uri.parse(storageUri).path ?: "")
+                if (fileFromUri.exists() && fileFromUri.length() > 0L) {
+                    val uri = runCatching {
+                        FileProvider.getUriForFile(context, authority, fileFromUri)
+                    }.getOrElse {
+                        val shareDir = File(context.cacheDir, "shared_recordings").apply { mkdirs() }
+                        val copied = File(shareDir, safeName)
+                        fileFromUri.copyTo(copied, overwrite = true)
+                        FileProvider.getUriForFile(context, authority, copied)
+                    }
+                    return@withContext Result.success(uri to mimeType)
+                }
+            }
+
+            if (storageUri.startsWith("content://")) {
+                return@withContext Result.success(Uri.parse(storageUri) to mimeType)
+            }
+
+            Result.failure(IllegalStateException("Recording file not found"))
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    fun launchShareRecordingIntent(uri: Uri, mimeType: String, subject: String): Boolean {
+        return runCatching {
+            val sendIntent = Intent(Intent.ACTION_SEND).apply {
+                type = mimeType
+                putExtra(Intent.EXTRA_STREAM, uri)
+                putExtra(Intent.EXTRA_SUBJECT, subject)
+                clipData = ClipData.newRawUri(subject, uri)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            val chooser = Intent.createChooser(sendIntent, "Share Call Recording").apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            context.startActivity(chooser)
+            true
+        }.getOrDefault(false)
     }
 
     fun deleteRecordingFile(fileName: String, storageUri: String = "") {

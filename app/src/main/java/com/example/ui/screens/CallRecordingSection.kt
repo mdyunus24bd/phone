@@ -22,6 +22,7 @@ import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.PersonAddAlt1
 import androidx.compose.material.icons.filled.PhoneInTalk
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -81,6 +82,7 @@ fun CallRecordingSection(
     onRemoveAutoRecordNumber: (String) -> Unit,
     onClearAutoRecordNumbers: () -> Unit,
     onTogglePlayback: (CallRecordingEntity) -> Unit,
+    onShareRecording: (CallRecordingEntity) -> Unit = {},
     onDeleteRecording: (CallRecordingEntity) -> Unit
 ) {
     val context = LocalContext.current
@@ -505,6 +507,16 @@ fun CallRecordingSection(
                                 text = "${formatDuration(rec.durationSec)} • ${rec.fileSizeBytes / 1024} KB • ${formatTimestamp(rec.createdAt)}",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        IconButton(
+                            onClick = { onShareRecording(rec) },
+                            modifier = Modifier.testTag("share_recording_${rec.id}")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.Share,
+                                contentDescription = "Share recording",
+                                tint = MaterialTheme.colorScheme.primary
                             )
                         }
                         IconButton(onClick = { onDeleteRecording(rec) }) {

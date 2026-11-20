@@ -30,6 +30,22 @@
         android:name="android.hardware.microphone"
         android:required="false" />
 
+    <!-- Explicit package visibility for linked contact accounts (WhatsApp, imo, Telegram, Viber, etc.) -->
+    <queries>
+        <package android:name="com.whatsapp" />
+        <package android:name="com.whatsapp.w4b" />
+        <package android:name="com.imo.android.imoim" />
+        <package android:name="com.imo.android.imoimhd" />
+        <package android:name="com.imo.android.imoimlite" />
+        <package android:name="org.telegram.messenger" />
+        <package android:name="org.telegram.messenger.web" />
+        <package android:name="org.thunderdog.challegram" />
+        <package android:name="com.viber.voip" />
+        <package android:name="org.thoughtcrime.securesms" />
+        <package android:name="com.google.android.apps.tachyon" />
+        <package android:name="com.facebook.orca" />
+    </queries>
+
     <application
         android:allowBackup="false"
         android:dataExtractionRules="@xml/data_extraction_rules"
@@ -113,6 +129,17 @@
         <receiver
             android:name=".telecom.IncomingCallActionReceiver"
             android:exported="false" />
+
+        <!-- Secure FileProvider for sharing call recordings via Android share sheet -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
     </application>
 
 </manifest>

@@ -50,7 +50,7 @@ data class CallLogEntity(
     val phoneNumber: String,
     val displayName: String = "",
     val callType: CallType = CallType.SIM,
-    val routeLabel: String = "SIM 1",
+    val routeLabel: String = "",
     val direction: CallDirection = CallDirection.OUTGOING,
     val timestamp: Long = System.currentTimeMillis(),
     val durationSec: Long = 0L,

@@ -1,8 +1,5 @@
 package com.example.ui.screens
 
-import android.content.ClipData
-import android.content.ClipboardManager
-import android.content.Context
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
@@ -12,6 +9,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -44,9 +42,6 @@ import androidx.compose.material.icons.automirrored.filled.CallReceived
 import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.ContentCopy
-import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.Dialpad
 import androidx.compose.material.icons.filled.FiberManualRecord
@@ -73,21 +68,26 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.InterceptPlatformTextInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -112,44 +112,47 @@ import com.example.ui.theme.CallEndRed
 import com.example.ui.theme.MonoMetricStyle
 import com.example.ui.theme.SimAccentEmerald
 import com.example.ui.theme.ThemeMode
-import kotlinx.coroutines.delay
+import kotlinx.coroutines.awaitCancellation
 
 /**
- * Extracts a clean dialable phone number (digits, optional leading '+', '*', '#', ',', ';')
- * from arbitrary clipboard text such as "Call +1 (555) 234-5678".
+ * Sanitizes a dialer TextFieldValue (e.g. after native long-press Paste or Cut) so only
+ * dialable characters remain while keeping the cursor at the corresponding offset.
  */
-private fun extractDialablePhoneNumber(raw: String): String {
-    val trimmed = raw.trim()
-    if (trimmed.isEmpty()) return ""
+private fun sanitizeDialFieldValue(value: TextFieldValue): TextFieldValue {
+    val raw = value.text
     val out = StringBuilder()
-    for (ch in trimmed) {
-        when {
-            ch in '0'..'9' || ch == '*' || ch == '#' || ch == ',' || ch == ';' -> out.append(ch)
-            ch == '+' && out.isEmpty() -> out.append(ch)
+    var mappedStart = 0
+    var mappedEnd = 0
+    val rawStart = value.selection.start.coerceIn(0, raw.length)
+    val rawEnd = value.selection.end.coerceIn(0, raw.length)
+
+    for (i in raw.indices) {
+        if (i == rawStart) mappedStart = out.length
+        if (i == rawEnd) mappedEnd = out.length
+        val ch = raw[i]
+        val keep = when {
+            ch in '0'..'9' || ch == '*' || ch == '#' || ch == ',' || ch == ';' -> true
+            ch == '+' && out.isEmpty() -> true
+            else -> false
         }
-        if (out.length >= 32) break
+        if (keep && out.length < 32) {
+            out.append(ch)
+        }
     }
-    val result = out.toString()
-    return if (result.any { it.isDigit() || it == '*' || it == '#' }) result else ""
+    if (rawStart >= raw.length) mappedStart = out.length
+    if (rawEnd >= raw.length) mappedEnd = out.length
+
+    val clean = out.toString()
+    return TextFieldValue(
+        text = clean,
+        selection = TextRange(
+            mappedStart.coerceIn(0, clean.length),
+            mappedEnd.coerceIn(0, clean.length)
+        )
+    )
 }
 
-private fun readClipboardDialNumber(context: Context): String {
-    val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager ?: return ""
-    val clip = cm.primaryClip ?: return ""
-    if (clip.itemCount <= 0) return ""
-    val text = clip.getItemAt(0).coerceToText(context)?.toString().orEmpty()
-    return extractDialablePhoneNumber(text)
-}
-
-private fun copyDialNumberToClipboard(context: Context, number: String): Boolean {
-    val clean = number.trim()
-    if (clean.isEmpty()) return false
-    val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager ?: return false
-    cm.setPrimaryClip(ClipData.newPlainText("Phone Number", clean))
-    return true
-}
-
-@OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class, ExperimentalComposeUiApi::class)
 @Composable
 fun DialerScreen(
     dialInput: String,
@@ -168,6 +171,7 @@ fun DialerScreen(
     autoRecordMode: AutoRecordMode,
     autoRecordSpecificCount: Int,
     onDigitClick: (Char) -> Unit,
+    onPlayDialTone: (Char) -> Unit = {},
     onSetDialInput: (String) -> Unit,
     onBackspace: () -> Unit,
     onClear: () -> Unit,
@@ -195,37 +199,71 @@ fun DialerScreen(
     val context = LocalContext.current
     val haptics = LocalHapticFeedback.current
     var showLayoutMenu by remember { mutableStateOf(false) }
-    var showClipboardMenu by remember { mutableStateOf(false) }
-    var clipboardFeedback by remember { mutableStateOf<String?>(null) }
 
-    LaunchedEffect(clipboardFeedback) {
-        if (clipboardFeedback != null) {
-            delay(1800)
-            clipboardFeedback = null
-        }
+    // Track cursor / selection position so tapping any digit lets the user remove or insert at that exact spot
+    var lastSyncedText by remember { mutableStateOf(dialInput) }
+    var cursorSelection by remember { mutableStateOf(TextRange(dialInput.length)) }
+    if (dialInput != lastSyncedText) {
+        lastSyncedText = dialInput
+        cursorSelection = TextRange(dialInput.length)
     }
+    val safeSelection = TextRange(
+        start = cursorSelection.start.coerceIn(0, dialInput.length),
+        end = cursorSelection.end.coerceIn(0, dialInput.length)
+    )
+    val dialFieldValue = TextFieldValue(
+        text = dialInput,
+        selection = safeSelection
+    )
 
-    val performCopy: () -> Unit = {
-        if (copyDialNumberToClipboard(context, dialInput)) {
-            haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-            clipboardFeedback = "Copied number"
-        }
-    }
-
-    val performPaste: (Boolean) -> Unit = { append ->
-        val pasted = readClipboardDialNumber(context)
-        if (pasted.isNotEmpty()) {
-            haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-            val next = if (append && dialInput.isNotEmpty()) {
-                (dialInput + pasted.trimStart('+')).take(32)
-            } else {
-                pasted
+    val handleInsertDigitAtCursor: (Char) -> Unit = { ch ->
+        val start = minOf(safeSelection.start, safeSelection.end)
+        val end = maxOf(safeSelection.start, safeSelection.end)
+        if (start == dialInput.length && end == dialInput.length) {
+            if (dialInput.length < 32) {
+                val updated = dialInput + ch
+                lastSyncedText = updated
+                cursorSelection = TextRange(updated.length)
+                onDigitClick(ch)
             }
-            onSetDialInput(next)
-            clipboardFeedback = if (append && dialInput.isNotEmpty()) "Appended number" else "Pasted number"
         } else {
-            clipboardFeedback = "No phone number in clipboard"
+            val updated = (dialInput.substring(0, start) + ch + dialInput.substring(end)).take(32)
+            val nextCursor = (start + 1).coerceAtMost(updated.length)
+            lastSyncedText = updated
+            cursorSelection = TextRange(nextCursor)
+            onSetDialInput(updated)
+            onPlayDialTone(ch)
         }
+    }
+
+    val handleBackspaceAtCursor: () -> Unit = {
+        val start = minOf(safeSelection.start, safeSelection.end)
+        val end = maxOf(safeSelection.start, safeSelection.end)
+        when {
+            dialInput.isEmpty() -> Unit
+            start != end -> {
+                val updated = dialInput.removeRange(start, end)
+                lastSyncedText = updated
+                cursorSelection = TextRange(start.coerceIn(0, updated.length))
+                onSetDialInput(updated)
+            }
+            start > 0 -> {
+                val updated = dialInput.removeRange(start - 1, start)
+                lastSyncedText = updated
+                cursorSelection = TextRange((start - 1).coerceIn(0, updated.length))
+                if (start == dialInput.length) {
+                    onBackspace()
+                } else {
+                    onSetDialInput(updated)
+                }
+            }
+        }
+    }
+
+    val handleClearAll: () -> Unit = {
+        lastSyncedText = ""
+        cursorSelection = TextRange(0)
+        onClear()
     }
 
     val dialedCountry = remember(dialInput) {
@@ -668,249 +706,129 @@ fun DialerScreen(
                     }
                 }
 
-                // Dial Number Display Area with Copy / Paste Number System
+                // Borderless Dial Number Display with Cursor-Targeted Specific Digit Removal
                 val displayScale = dialerSize.scale.coerceIn(0.84f, 1.24f)
                 val displayFontSize = if (dialInput.length > 13) {
                     (24f * displayScale).sp
                 } else {
                     (32f * displayScale).sp
                 }
-                Surface(
-                    shape = RoundedCornerShape(24.dp),
-                    color = MaterialTheme.colorScheme.surfaceContainerLow,
-                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-                    modifier = Modifier.fillMaxWidth()
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 4.dp, vertical = (6f * displayScale).dp.coerceIn(4.dp, 10.dp)),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 8.dp, vertical = (9f * displayScale).dp.coerceIn(8.dp, 14.dp)),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            // 1-Tap Paste Number button
-                            IconButton(
-                                onClick = { performPaste(false) },
-                                modifier = Modifier
-                                    .size(48.dp)
-                                    .testTag("dial_paste_button")
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Filled.ContentPaste,
-                                    contentDescription = "Paste phone number",
-                                    tint = MaterialTheme.colorScheme.primary
-                                )
-                            }
+                        // Balanced spacer so entered digits stay visually centered
+                        Spacer(Modifier.width(48.dp))
 
-                            // Dialed Number Text with Long-Press Copy/Paste/Clear Menu
-                            Box(
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .clip(RoundedCornerShape(12.dp))
-                                    .combinedClickable(
-                                        onClick = {
-                                            if (dialInput.isEmpty()) {
-                                                showClipboardMenu = true
-                                            }
-                                        },
-                                        onLongClick = {
-                                            haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                                            showClipboardMenu = true
-                                        }
-                                    )
-                                    .padding(horizontal = 4.dp, vertical = 4.dp),
-                                contentAlignment = Alignment.Center
+                        // Tap anywhere in the number to move the cursor or drag to select specific digits
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .padding(horizontal = 4.dp, vertical = 2.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            InterceptPlatformTextInput(
+                                interceptor = { _, _ -> awaitCancellation() }
                             ) {
-                                Text(
-                                    text = dialInput.ifEmpty { "" },
-                                    fontSize = displayFontSize,
-                                    lineHeight = (displayFontSize.value * 1.18f).sp,
-                                    fontWeight = FontWeight.Medium,
-                                    color = if (dialInput.isEmpty()) {
-                                        MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f)
-                                    } else {
-                                        MaterialTheme.colorScheme.onSurface
+                                BasicTextField(
+                                    value = dialFieldValue,
+                                    onValueChange = { updatedValue ->
+                                        if (updatedValue.text == dialInput) {
+                                            cursorSelection = updatedValue.selection
+                                        } else {
+                                            val sanitized = sanitizeDialFieldValue(updatedValue)
+                                            lastSyncedText = sanitized.text
+                                            cursorSelection = sanitized.selection
+                                            onSetDialInput(sanitized.text)
+                                        }
                                     },
-                                    textAlign = TextAlign.Center,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
+                                    singleLine = true,
+                                    textStyle = TextStyle(
+                                        fontSize = displayFontSize,
+                                        lineHeight = (displayFontSize.value * 1.18f).sp,
+                                        fontWeight = FontWeight.Medium,
+                                        color = MaterialTheme.colorScheme.onSurface,
+                                        textAlign = TextAlign.Center
+                                    ),
+                                    cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
                                     modifier = Modifier
                                         .fillMaxWidth()
                                         .testTag("dial_display_text")
                                 )
-                                DropdownMenu(
-                                    expanded = showClipboardMenu,
-                                    onDismissRequest = { showClipboardMenu = false }
-                                ) {
-                                    DropdownMenuItem(
-                                        text = { Text("Paste Number") },
-                                        leadingIcon = {
-                                            Icon(
-                                                imageVector = Icons.Filled.ContentPaste,
-                                                contentDescription = null,
-                                                modifier = Modifier.size(18.dp)
-                                            )
-                                        },
-                                        onClick = {
-                                            showClipboardMenu = false
-                                            performPaste(false)
-                                        },
-                                        modifier = Modifier.testTag("dial_menu_paste")
-                                    )
-                                    if (dialInput.isNotEmpty()) {
-                                        DropdownMenuItem(
-                                            text = { Text("Copy Number") },
-                                            leadingIcon = {
-                                                Icon(
-                                                    imageVector = Icons.Filled.ContentCopy,
-                                                    contentDescription = null,
-                                                    modifier = Modifier.size(18.dp)
-                                                )
-                                            },
-                                            onClick = {
-                                                showClipboardMenu = false
-                                                performCopy()
-                                            },
-                                            modifier = Modifier.testTag("dial_menu_copy")
-                                        )
-                                        DropdownMenuItem(
-                                            text = { Text("Append from Clipboard") },
-                                            leadingIcon = {
-                                                Icon(
-                                                    imageVector = Icons.Filled.ContentPaste,
-                                                    contentDescription = null,
-                                                    modifier = Modifier.size(18.dp)
-                                                )
-                                            },
-                                            onClick = {
-                                                showClipboardMenu = false
-                                                performPaste(true)
-                                            },
-                                            modifier = Modifier.testTag("dial_menu_append")
-                                        )
-                                        HorizontalDivider()
-                                        DropdownMenuItem(
-                                            text = { Text("Clear", color = CallEndRed) },
-                                            leadingIcon = {
-                                                Icon(
-                                                    imageVector = Icons.Filled.Close,
-                                                    contentDescription = null,
-                                                    tint = CallEndRed,
-                                                    modifier = Modifier.size(18.dp)
-                                                )
-                                            },
-                                            onClick = {
-                                                showClipboardMenu = false
-                                                onClear()
-                                            },
-                                            modifier = Modifier.testTag("dial_menu_clear")
-                                        )
-                                    }
-                                }
-                            }
-
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                // 1-Tap Copy Number button when digits are present
-                                AnimatedVisibility(visible = dialInput.isNotEmpty()) {
-                                    IconButton(
-                                        onClick = performCopy,
-                                        modifier = Modifier
-                                            .size(48.dp)
-                                            .testTag("dial_copy_button")
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.Filled.ContentCopy,
-                                            contentDescription = "Copy phone number",
-                                            tint = MaterialTheme.colorScheme.primary
-                                        )
-                                    }
-                                }
-                                // Backspace (tap deletes 1 digit, long-press clears all)
-                                Box(
-                                    modifier = Modifier
-                                        .size(48.dp)
-                                        .clip(CircleShape)
-                                        .combinedClickable(
-                                            onClick = onBackspace,
-                                            onLongClick = {
-                                                if (dialInput.isNotEmpty()) {
-                                                    haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                                                    onClear()
-                                                }
-                                            }
-                                        )
-                                        .testTag("dial_backspace_button"),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.AutoMirrored.Filled.Backspace,
-                                        contentDescription = "Delete digit",
-                                        tint = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                }
                             }
                         }
 
-                        // Inline Clipboard Feedback Banner
-                        AnimatedVisibility(visible = clipboardFeedback != null) {
-                            clipboardFeedback?.let { feedback ->
-                                Surface(
-                                    shape = RoundedCornerShape(999.dp),
-                                    color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.85f),
-                                    modifier = Modifier.testTag("dial_clipboard_feedback")
-                                ) {
-                                    Text(
-                                        text = feedback,
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.onPrimaryContainer,
-                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 3.dp)
-                                    )
-                                }
+                        // Backspace: tap removes specific digit/selection at cursor; long-press clears all
+                        Box(
+                            modifier = Modifier
+                                .size(48.dp)
+                                .clip(CircleShape)
+                                .combinedClickable(
+                                    enabled = dialInput.isNotEmpty(),
+                                    onClick = handleBackspaceAtCursor,
+                                    onLongClick = {
+                                        if (dialInput.isNotEmpty()) {
+                                            haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                            handleClearAll()
+                                        }
+                                    }
+                                )
+                                .testTag("dial_backspace_button"),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            if (dialInput.isNotEmpty()) {
+                                Icon(
+                                    imageVector = Icons.AutoMirrored.Filled.Backspace,
+                                    contentDescription = "Delete digit at cursor",
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
                             }
                         }
+                    }
 
-                        // Live resolved calling country name for typed number
-                        AnimatedVisibility(visible = dialedCountry.isNotBlank()) {
+                    // Live resolved calling country name for typed number
+                    AnimatedVisibility(visible = dialedCountry.isNotBlank()) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(5.dp),
+                            modifier = Modifier.testTag("dial_country_label")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.Public,
+                                contentDescription = "Calling country",
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(14.dp)
+                            )
+                            Text(
+                                text = dialedCountry,
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+
+                    // Real-time Spam Assessment indicator for typed number
+                    AnimatedVisibility(visible = spamAssessment != null && spamAssessment.level != SpamRiskLevel.SAFE) {
+                        spamAssessment?.let { info ->
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(5.dp),
-                                modifier = Modifier.testTag("dial_country_label")
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
-                                Icon(
-                                    imageVector = Icons.Filled.Public,
-                                    contentDescription = "Calling country",
-                                    tint = MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier.size(14.dp)
-                                )
+                                SpamRiskChip(level = info.level, score = info.score)
                                 Text(
-                                    text = dialedCountry,
-                                    style = MaterialTheme.typography.labelMedium,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    text = info.reason,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
                                 )
-                            }
-                        }
-
-                        // Real-time Spam Assessment indicator for typed number
-                        AnimatedVisibility(visible = spamAssessment != null && spamAssessment.level != SpamRiskLevel.SAFE) {
-                            spamAssessment?.let { info ->
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                ) {
-                                    SpamRiskChip(level = info.level, score = info.score)
-                                    Text(
-                                        text = info.reason,
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                }
                             }
                         }
                     }
@@ -926,11 +844,11 @@ fun DialerScreen(
                             sizeScale = dialerSize.scale,
                             onKeyPress = { ch ->
                                 haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                onDigitClick(ch)
+                                handleInsertDigitAtCursor(ch)
                             },
                             onZeroLongPress = {
                                 haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                                onDigitClick('+')
+                                handleInsertDigitAtCursor('+')
                             }
                         )
 
@@ -938,11 +856,11 @@ fun DialerScreen(
                             sizeScale = dialerSize.scale,
                             onKeyPress = { ch ->
                                 haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                onDigitClick(ch)
+                                handleInsertDigitAtCursor(ch)
                             },
                             onZeroLongPress = {
                                 haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                                onDigitClick('+')
+                                handleInsertDigitAtCursor('+')
                             }
                         )
 
@@ -950,11 +868,11 @@ fun DialerScreen(
                             sizeScale = dialerSize.scale,
                             onKeyPress = { ch ->
                                 haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                onDigitClick(ch)
+                                handleInsertDigitAtCursor(ch)
                             },
                             onZeroLongPress = {
                                 haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                                onDigitClick('+')
+                                handleInsertDigitAtCursor('+')
                             }
                         )
 
@@ -962,11 +880,11 @@ fun DialerScreen(
                             sizeScale = dialerSize.scale,
                             onKeyPress = { ch ->
                                 haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                onDigitClick(ch)
+                                handleInsertDigitAtCursor(ch)
                             },
                             onZeroLongPress = {
                                 haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                                onDigitClick('+')
+                                handleInsertDigitAtCursor('+')
                             }
                         )
 
@@ -974,11 +892,11 @@ fun DialerScreen(
                             sizeScale = dialerSize.scale,
                             onKeyPress = { ch ->
                                 haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                onDigitClick(ch)
+                                handleInsertDigitAtCursor(ch)
                             },
                             onZeroLongPress = {
                                 haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                                onDigitClick('+')
+                                handleInsertDigitAtCursor('+')
                             }
                         )
 
@@ -986,11 +904,11 @@ fun DialerScreen(
                             sizeScale = dialerSize.scale,
                             onKeyPress = { ch ->
                                 haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                onDigitClick(ch)
+                                handleInsertDigitAtCursor(ch)
                             },
                             onZeroLongPress = {
                                 haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                                onDigitClick('+')
+                                handleInsertDigitAtCursor('+')
                             }
                         )
 
@@ -1000,15 +918,15 @@ fun DialerScreen(
                             dialInputNotEmpty = dialInput.isNotEmpty(),
                             onKeyPress = { ch ->
                                 haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                onDigitClick(ch)
+                                handleInsertDigitAtCursor(ch)
                             },
                             onZeroLongPress = {
                                 haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                                onDigitClick('+')
+                                handleInsertDigitAtCursor('+')
                             },
                             onSwapHand = { onSelectKeypadLayout(KeypadLayoutStyle.ONE_HANDED_LEFT) },
-                            onBackspace = onBackspace,
-                            onClear = onClear
+                            onBackspace = handleBackspaceAtCursor,
+                            onClear = handleClearAll
                         )
 
                         KeypadLayoutStyle.ONE_HANDED_LEFT -> OneHandedKeypad(
@@ -1017,15 +935,15 @@ fun DialerScreen(
                             dialInputNotEmpty = dialInput.isNotEmpty(),
                             onKeyPress = { ch ->
                                 haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                onDigitClick(ch)
+                                handleInsertDigitAtCursor(ch)
                             },
                             onZeroLongPress = {
                                 haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                                onDigitClick('+')
+                                handleInsertDigitAtCursor('+')
                             },
                             onSwapHand = { onSelectKeypadLayout(KeypadLayoutStyle.ONE_HANDED_RIGHT) },
-                            onBackspace = onBackspace,
-                            onClear = onClear
+                            onBackspace = handleBackspaceAtCursor,
+                            onClear = handleClearAll
                         )
                     }
                 }
@@ -1096,7 +1014,7 @@ fun DialerScreen(
                         modifier = Modifier
                             .size(sideActionSize)
                             .clip(CircleShape)
-                            .clickable(enabled = dialInput.isNotEmpty()) { onClear() }
+                            .clickable(enabled = dialInput.isNotEmpty()) { handleClearAll() }
                             .testTag("clear_dial_button")
                     ) {
                         Box(contentAlignment = Alignment.Center) {

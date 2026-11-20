@@ -747,12 +747,10 @@ class VoxLineRepository(
                     val key = "$number:$date"
                     val existing = existingByKey[key]
                     if (existing != null) {
-                        val isGenericLabel = existing.routeLabel.isBlank() ||
-                            existing.routeLabel.equals("Device SIM", ignoreCase = true) ||
-                            existing.routeLabel.equals("SIM Cellular", ignoreCase = true) ||
-                            existing.routeLabel.equals("Phone Default SIM", ignoreCase = true)
-                        if (isGenericLabel && resolvedSimLabel.isNotBlank() && resolvedSimLabel != existing.routeLabel) {
-                            db.callHistoryDao().updateRouteLabel(existing.id, resolvedSimLabel)
+                        val cleanedExisting = com.example.telecom.extractSimCompanyName(existing.routeLabel)
+                        val nextRouteLabel = resolvedSimLabel.ifBlank { cleanedExisting }
+                        if (existing.routeLabel != nextRouteLabel) {
+                            db.callHistoryDao().updateRouteLabel(existing.id, nextRouteLabel)
                         }
                     } else if (number.isNotEmpty() && existingKeys.add(key)) {
                         val dir = when (type) {
@@ -940,7 +938,7 @@ class VoxLineRepository(
                             phoneNumber = num,
                             displayName = name,
                             callType = CallType.SIM,
-                            routeLabel = o.optString("routeLabel", "Synced"),
+                            routeLabel = com.example.telecom.extractSimCompanyName(o.optString("routeLabel", "")),
                             direction = CallDirection.fromRaw(o.optString("direction", "OUTGOING")),
                             timestamp = ts,
                             durationSec = o.optLong("durationSec", 0L),

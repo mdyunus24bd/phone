@@ -26,6 +26,7 @@ import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Public
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.SimCard
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.Card
@@ -55,6 +56,7 @@ import com.example.data.local.ContactEntity
 import com.example.data.local.SpamRuleEntity
 import com.example.telecom.PhoneCountryResolver
 import com.example.telecom.SpamAnalyzer
+import com.example.telecom.extractSimCompanyName
 import com.example.ui.components.ContactAvatar
 import com.example.ui.components.formatDuration
 import com.example.ui.components.formatTimestamp
@@ -126,32 +128,8 @@ internal fun groupCallLogsByUniqueNumber(
 }
 
 /**
- * Normalizes a persisted routeLabel (e.g. "SIM 1 • Airtel", "SIM 2", "Device SIM")
- * into a clean display label and slot number (1, 2, or null).
- */
-internal fun parseSimSlotInfo(routeLabel: String): Pair<Int?, String> {
-    val trimmed = routeLabel.trim()
-    val lower = trimmed.lowercase()
-    return when {
-        lower.contains("sim 2") || lower.contains("sim2") || lower.contains("slot 2") -> {
-            2 to trimmed
-        }
-        lower.contains("sim 1") || lower.contains("sim1") || lower.contains("slot 1") -> {
-            1 to trimmed
-        }
-        trimmed.isBlank() ||
-            lower == "device sim" ||
-            lower == "sim cellular" ||
-            lower == "phone default sim" ||
-            lower == "synced" -> {
-            null to "SIM"
-        }
-        else -> null to trimmed
-    }
-}
-
-/**
- * Compact SIM indicator badge showing which SIM (e.g. SIM 1, SIM 2) was used for the call.
+ * Compact SIM indicator badge showing only the SIM company/carrier name (e.g. "Grameenphone", "Airtel", "Robi").
+ * Never renders "SIM 1", "SIM 2", or a standalone "SIM" label — hides itself completely when no company name is available.
  */
 @Composable
 internal fun SimSlotBadge(
@@ -159,22 +137,17 @@ internal fun SimSlotBadge(
     compact: Boolean = true,
     modifier: Modifier = Modifier
 ) {
-    val (slotNumber, fullLabel) = remember(routeLabel) { parseSimSlotInfo(routeLabel) }
-    val displayText = remember(slotNumber, fullLabel, compact) {
-        if (compact) {
-            when (slotNumber) {
-                1 -> "SIM 1"
-                2 -> "SIM 2"
-                else -> fullLabel.substringBefore("•").trim().ifBlank { "SIM" }
-            }
-        } else {
-            fullLabel.ifBlank { "SIM" }
+    val companyName = remember(routeLabel) { extractSimCompanyName(routeLabel) }
+    if (companyName.isBlank()) return
+
+    val accentColor = remember(routeLabel, companyName) {
+        val lower = routeLabel.lowercase()
+        when {
+            lower.contains("sim 2") || lower.contains("sim2") || lower.contains("slot 2") -> CallAcceptGreen
+            lower.contains("sim 1") || lower.contains("sim1") || lower.contains("slot 1") -> AccentSkyBlue
+            (companyName.lowercase().hashCode() and 1) == 0 -> AccentSkyBlue
+            else -> CallAcceptGreen
         }
-    }
-    val accentColor = when (slotNumber) {
-        1 -> AccentSkyBlue
-        2 -> CallAcceptGreen
-        else -> MaterialTheme.colorScheme.secondary
     }
 
     Surface(
@@ -192,12 +165,12 @@ internal fun SimSlotBadge(
         ) {
             Icon(
                 imageVector = Icons.Filled.SimCard,
-                contentDescription = "Called using $displayText",
+                contentDescription = "Called using $companyName",
                 tint = accentColor,
                 modifier = Modifier.size(if (compact) 11.dp else 12.dp)
             )
             Text(
-                text = displayText,
+                text = companyName,
                 style = MaterialTheme.typography.labelSmall,
                 fontWeight = FontWeight.SemiBold,
                 color = accentColor,
@@ -259,6 +232,7 @@ internal fun RecordedCallCard(
     recording: CallRecordingEntity,
     isPlaying: Boolean,
     onTogglePlayback: () -> Unit,
+    onShare: () -> Unit = {},
     onCallBack: () -> Unit,
     onDelete: () -> Unit
 ) {
@@ -372,6 +346,16 @@ internal fun RecordedCallCard(
                         tint = MaterialTheme.colorScheme.primary
                     )
                 }
+            }
+            IconButton(
+                onClick = onShare,
+                modifier = Modifier.testTag("share_recorded_call_${recording.id}")
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.Share,
+                    contentDescription = "Share recording",
+                    tint = MaterialTheme.colorScheme.primary
+                )
             }
             IconButton(onClick = onDelete) {
                 Icon(

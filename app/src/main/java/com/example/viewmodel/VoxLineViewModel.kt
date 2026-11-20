@@ -325,11 +325,11 @@ class VoxLineViewModel(application: Application) : AndroidViewModel(application)
                     val liveStatus = when {
                         sysCall.isConference && sysCall.isHolding -> "Conference On Hold"
                         sysCall.isConference -> "Conference • ${resolvedParticipants.size.coerceAtLeast(2)} callers"
-                        sysCall.isRinging -> "Incoming SIM Call"
+                        sysCall.isRinging -> "Incoming Call"
                         sysCall.isHolding -> "Call On Hold"
-                        sysCall.isDialing -> "Dialing via SIM..."
-                        sysCall.isConnected -> "Connected (SIM)"
-                        else -> "SIM Call"
+                        sysCall.isDialing -> "Dialing..."
+                        sysCall.isConnected -> "Connected"
+                        else -> "Calling"
                     }
 
                     val matched = if (sysCall.isConference) null else repository.findContactByAddress(sysCall.handle)
@@ -532,6 +532,10 @@ class VoxLineViewModel(application: Application) : AndroidViewModel(application)
 
     fun appendDigit(digit: Char) {
         _dialInput.update { it + digit }
+        playDialTone(digit)
+    }
+
+    fun playDialTone(digit: Char) {
         if (settings.value.dtmfTonesEnabled) {
             telecomBridge.playDtmfTone(digit)
         }
@@ -606,7 +610,7 @@ class VoxLineViewModel(application: Application) : AndroidViewModel(application)
                         phoneNumber = cleanAddress,
                         displayName = matchedContact?.displayName.orEmpty(),
                         callType = CallType.SIM,
-                        routeLabel = selectedSim?.displayName ?: "Phone Default SIM",
+                        routeLabel = selectedSim?.carrierName.orEmpty(),
                         direction = CallDirection.BLOCKED,
                         contactInfo = CallContactInfo(
                             contactId = matchedContact?.id,
@@ -645,9 +649,9 @@ class VoxLineViewModel(application: Application) : AndroidViewModel(application)
                 preferredSlotIndex = _selectedSimIndex.value
             )
             if (!dispatched) {
-                showMessage("Unable to place carrier SIM call on this device.")
+                showMessage("Unable to place call on this device.")
             } else if (!telecomBridge.isDefaultDialer()) {
-                showMessage("Dialing $finalDestination via carrier SIM...")
+                showMessage("Dialing $finalDestination...")
             }
         }
     }
@@ -858,7 +862,7 @@ class VoxLineViewModel(application: Application) : AndroidViewModel(application)
         _activeCall.update {
             it?.copy(
                 isOnHold = nextHold,
-                statusLabel = if (nextHold) "Call On Hold" else "Active SIM Call"
+                statusLabel = if (nextHold) "Call On Hold" else "Active Call"
             )
         }
     }
@@ -1170,6 +1174,29 @@ class VoxLineViewModel(application: Application) : AndroidViewModel(application)
             callRecordingManager.deleteRecordingFile(recording.fileName, recording.storageUri)
             repository.deleteRecording(recording)
             showMessage("Recording deleted from App Internal Storage.")
+        }
+    }
+
+    fun shareRecording(recording: CallRecordingEntity) {
+        viewModelScope.launch {
+            val prepared = callRecordingManager.prepareShareableRecording(
+                fileName = recording.fileName,
+                storageUri = recording.storageUri,
+                encryptedAtRest = recording.encryptedAtRest
+            )
+            val (uri, mimeType) = prepared.getOrElse { err ->
+                showMessage("Unable to share recording: ${err.message ?: "File unavailable"}")
+                return@launch
+            }
+            val label = recording.displayName.ifBlank { recording.phoneNumber }.ifBlank { "Call Recording" }
+            val launched = callRecordingManager.launchShareRecordingIntent(
+                uri = uri,
+                mimeType = mimeType,
+                subject = "Call recording - $label"
+            )
+            if (!launched) {
+                showMessage("No app available to share this recording.")
+            }
         }
     }
 

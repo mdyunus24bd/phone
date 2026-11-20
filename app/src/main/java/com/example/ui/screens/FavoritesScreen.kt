@@ -66,6 +66,7 @@ fun FavoritesScreen(
     onCallContact: (String) -> Unit,
     onToggleFavorite: (ContactEntity) -> Unit,
     onTogglePlayback: (CallRecordingEntity) -> Unit,
+    onShareRecording: (CallRecordingEntity) -> Unit = {},
     onReportSpam: (String) -> Unit,
     onDeleteLog: (Long) -> Unit,
     onOpenSettings: () -> Unit,
@@ -301,6 +302,7 @@ fun FavoritesScreen(
             },
             onAddContact = null,
             onTogglePlayback = onTogglePlayback,
+            onShareRecording = onShareRecording,
             onReportSpam = onReportSpam,
             onDeleteLog = onDeleteLog
         )

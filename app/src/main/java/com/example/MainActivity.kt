@@ -555,6 +555,7 @@ private fun VoxLineRootApp(
                                 },
                                 onToggleFavorite = viewModel::toggleFavoriteContact,
                                 onTogglePlayback = viewModel::togglePlayback,
+                                onShareRecording = viewModel::shareRecording,
                                 onReportSpam = { num ->
                                     viewModel.addSpamRule(num, "Reported Spam", 95, true)
                                 },
@@ -586,6 +587,7 @@ private fun VoxLineRootApp(
                                 onRequestDefaultDialer = requestDefaultDialerAction,
                                 onEnableIncomingOverDisplay = requestIncomingOverDisplayAction,
                                 onTogglePlayback = viewModel::togglePlayback,
+                                onShareRecording = viewModel::shareRecording,
                                 onDeleteRecording = viewModel::deleteRecording,
                                 onReportSpam = { num ->
                                     viewModel.addSpamRule(num, "Reported Spam", 95, true)
@@ -621,6 +623,7 @@ private fun VoxLineRootApp(
                                     viewModel.startCall(addr)
                                 },
                                 onTogglePlayback = viewModel::togglePlayback,
+                                onShareRecording = viewModel::shareRecording,
                                 onReportSpam = { num ->
                                     viewModel.addSpamRule(num, "Reported Spam", 95, true)
                                 },
@@ -668,6 +671,7 @@ private fun VoxLineRootApp(
                 autoRecordMode = settings.autoRecordMode,
                 autoRecordSpecificCount = settings.autoRecordNumbers.size,
                 onDigitClick = viewModel::appendDigit,
+                onPlayDialTone = viewModel::playDialTone,
                 onSetDialInput = viewModel::setDialInput,
                 onBackspace = viewModel::backspaceDialInput,
                 onClear = viewModel::clearDialInput,
@@ -790,6 +794,7 @@ private fun VoxLineRootApp(
                 onRemoveAutoRecordNumber = viewModel::removeAutoRecordNumber,
                 onClearAutoRecordNumbers = viewModel::clearAutoRecordNumbers,
                 onToggleRecordingPlayback = viewModel::togglePlayback,
+                onShareRecording = viewModel::shareRecording,
                 onDeleteRecording = viewModel::deleteRecording,
                 onSelectRingtone = { uri, title ->
                     viewModel.selectSimRingtone(uri, title, playPreview = true)

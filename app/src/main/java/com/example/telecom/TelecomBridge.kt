@@ -26,9 +26,61 @@ data class SimSlotInfo(
     val isSystemDefault: Boolean = false
 )
 
+private val GENERIC_SLOT_REGEX = Regex("^(sim|slot|card|sub|subscription)\\s*\\d+$", RegexOption.IGNORE_CASE)
+private val GENERIC_SIM_NAMES = setOf(
+    "sim",
+    "sim card",
+    "device sim",
+    "sim cellular",
+    "phone default sim",
+    "carrier sim",
+    "default sim",
+    "cellular",
+    "synced",
+    "android",
+    "unknown",
+    "no service",
+    "emergency calls only",
+    "none",
+    "n/a"
+)
+
+/**
+ * Extracts only the real SIM carrier/company name (e.g. "Grameenphone", "Airtel", "Robi", "Jio")
+ * from a raw route label or Android Subscription/PhoneAccount text.
+ * Strips slot prefixes ("SIM 1 •", "SIM 2 •", "CARD 1", etc.) and returns "" when only a
+ * generic label ("SIM", "SIM 1", "SIM 2", "Device SIM", etc.) is available.
+ */
+fun extractSimCompanyName(raw: String): String {
+    val trimmed = raw.trim()
+    if (trimmed.isEmpty()) return ""
+
+    val segments = trimmed
+        .split("•", "|", "—", "–", " - ")
+        .map { it.trim() }
+        .filter { it.isNotEmpty() }
+
+    val meaningful = segments.mapNotNull { segment ->
+        val cleaned = segment
+            .replace(Regex("^(sim|slot|card)\\s*\\d+\\s*[:\\-•|]?\\s*", RegexOption.IGNORE_CASE), "")
+            .replace(Regex("\\s*\\((sim|slot|card)\\s*\\d+\\)$", RegexOption.IGNORE_CASE), "")
+            .trim()
+        val normalized = cleaned.lowercase().replace(Regex("\\s+"), " ")
+        when {
+            cleaned.isBlank() -> null
+            GENERIC_SLOT_REGEX.matches(normalized) -> null
+            normalized in GENERIC_SIM_NAMES -> null
+            cleaned.all { it.isDigit() } -> null
+            else -> cleaned
+        }
+    }
+
+    return meaningful.firstOrNull().orEmpty()
+}
+
 /**
  * Snapshot of active SIM subscriptions and Telecom PhoneAccountHandles used to resolve
- * which SIM slot (e.g. "SIM 1" / "SIM 2") handled a live or logged call without repeated IPC.
+ * which SIM carrier/company handled a live or logged call without repeated IPC.
  */
 class SimAccountLookup(
     private val activeSims: List<SimSlotInfo>,
@@ -55,20 +107,23 @@ class SimAccountLookup(
                             rawId.startsWith(iccId, ignoreCase = true) ||
                             iccId.startsWith(rawId, ignoreCase = true)
                         ))
-            }?.let { return formatSimLabel(it) }
+            }?.let { sim ->
+                formatSimLabel(sim).takeIf { it.isNotBlank() }?.let { return it }
+            }
 
             // 2. Match against TelecomManager.callCapablePhoneAccounts ordering
             val handleIdx = phoneAccountIdsInOrder.indexOfFirst { it.equals(rawId, ignoreCase = true) }
             if (handleIdx >= 0) {
-                activeSims.getOrNull(handleIdx)?.let { return formatSimLabel(it) }
-                return "SIM ${handleIdx + 1}"
+                activeSims.getOrNull(handleIdx)?.let { sim ->
+                    formatSimLabel(sim).takeIf { it.isNotBlank() }?.let { return it }
+                }
             }
 
             // 3. Match against PhoneAccount label resolved from TelecomManager
             val mappedLabel = phoneAccountLabelsById[rawId].orEmpty()
             matchSimByText(mappedLabel)?.let { return it }
 
-            // 4. Match explicit slot hints in accountId (e.g. "0", "1", "SIM1", "SIM 2")
+            // 4. Match explicit slot hints in accountId (e.g. "0", "1", "SIM1", "SIM 2") -> map to carrier name
             matchSimByText(rawId)?.let { return it }
         }
 
@@ -77,20 +132,32 @@ class SimAccountLookup(
             matchSimByText(rawLabel)?.let { return it }
         }
 
-        // 6. Fallback to explicit selected slot or default / single active SIM
+        // 6. Fallback to explicit selected slot or default / single active SIM company name
         if (fallbackSlotIndex >= 0) {
-            activeSims.firstOrNull { it.slotIndex == fallbackSlotIndex }?.let { return formatSimLabel(it) }
-            activeSims.getOrNull(fallbackSlotIndex)?.let { return formatSimLabel(it) }
-            return "SIM ${fallbackSlotIndex + 1}"
+            activeSims.firstOrNull { it.slotIndex == fallbackSlotIndex }
+                ?.let { formatSimLabel(it) }
+                ?.takeIf { it.isNotBlank() }
+                ?.let { return it }
+            activeSims.getOrNull(fallbackSlotIndex)
+                ?.let { formatSimLabel(it) }
+                ?.takeIf { it.isNotBlank() }
+                ?.let { return it }
+            return ""
         }
 
         if (activeSims.size == 1) {
             return formatSimLabel(activeSims.first())
         }
-        activeSims.firstOrNull { it.isSystemDefault }?.let { return formatSimLabel(it) }
-        activeSims.firstOrNull()?.let { return formatSimLabel(it) }
+        activeSims.firstOrNull { it.isSystemDefault }
+            ?.let { formatSimLabel(it) }
+            ?.takeIf { it.isNotBlank() }
+            ?.let { return it }
+        activeSims.firstOrNull()
+            ?.let { formatSimLabel(it) }
+            ?.takeIf { it.isNotBlank() }
+            ?.let { return it }
 
-        return "SIM 1"
+        return ""
     }
 
     private fun matchSimByText(text: String): String? {
@@ -98,26 +165,27 @@ class SimAccountLookup(
         val lower = text.lowercase()
         activeSims.firstOrNull { sim ->
             sim.carrierName.isNotBlank() && lower.contains(sim.carrierName.lowercase())
-        }?.let { return formatSimLabel(it) }
+        }?.let { sim ->
+            formatSimLabel(sim).takeIf { it.isNotBlank() }?.let { return it }
+        }
 
-        return when {
-            lower == "0" || lower.contains("sim 1") || lower.contains("sim1") || lower.contains("slot 1") -> {
-                activeSims.firstOrNull { it.slotIndex == 0 }?.let { formatSimLabel(it) } ?: "SIM 1"
+        val slotMatched = when {
+            lower == "0" || lower.contains("sim 1") || lower.contains("sim1") || lower.contains("slot 1") || lower.contains("card 1") -> {
+                activeSims.firstOrNull { it.slotIndex == 0 }?.let { formatSimLabel(it) }?.takeIf { it.isNotBlank() }
             }
-            lower == "1" || lower.contains("sim 2") || lower.contains("sim2") || lower.contains("slot 2") -> {
-                activeSims.firstOrNull { it.slotIndex == 1 }?.let { formatSimLabel(it) } ?: "SIM 2"
+            lower == "1" || lower.contains("sim 2") || lower.contains("sim2") || lower.contains("slot 2") || lower.contains("card 2") -> {
+                activeSims.firstOrNull { it.slotIndex == 1 }?.let { formatSimLabel(it) }?.takeIf { it.isNotBlank() }
             }
             else -> null
         }
+        if (slotMatched != null) return slotMatched
+
+        return extractSimCompanyName(text).takeIf { it.isNotBlank() }
     }
 
     companion object {
         fun formatSimLabel(sim: SimSlotInfo): String {
-            return if (sim.carrierName.isNotBlank()) {
-                "${sim.displayName} • ${sim.carrierName}"
-            } else {
-                sim.displayName
-            }
+            return extractSimCompanyName(sim.carrierName.ifBlank { sim.displayName })
         }
     }
 }
@@ -186,22 +254,14 @@ class TelecomBridge(private val context: Context) {
             val defaultVoiceSubId = SubscriptionManager.getDefaultVoiceSubscriptionId()
             val list = subManager?.activeSubscriptionInfoList.orEmpty()
             list.sortedBy { it.simSlotIndex }.map { info ->
-                val slotLabel = "SIM ${info.simSlotIndex + 1}"
-                val rawCarrier = info.carrierName?.toString()?.trim().orEmpty()
-                val cleanCarrier = if (
-                    rawCarrier.isBlank() ||
-                    rawCarrier.equals("T-Mobile", ignoreCase = true) ||
-                    rawCarrier.equals("Android", ignoreCase = true)
-                ) {
-                    ""
-                } else {
-                    rawCarrier
-                }
+                val carrierFromNetwork = extractSimCompanyName(info.carrierName?.toString().orEmpty())
+                val carrierFromDisplay = extractSimCompanyName(info.displayName?.toString().orEmpty())
+                val cleanCompany = carrierFromNetwork.ifBlank { carrierFromDisplay }
                 SimSlotInfo(
                     subscriptionId = info.subscriptionId,
                     slotIndex = info.simSlotIndex,
-                    displayName = slotLabel,
-                    carrierName = cleanCarrier,
+                    displayName = cleanCompany,
+                    carrierName = cleanCompany,
                     isSystemDefault = defaultVoiceSubId != SubscriptionManager.INVALID_SUBSCRIPTION_ID &&
                         info.subscriptionId == defaultVoiceSubId
                 )

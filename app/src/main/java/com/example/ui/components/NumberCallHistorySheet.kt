@@ -25,6 +25,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.CallMade
 import androidx.compose.material.icons.automirrored.filled.CallMissed
 import androidx.compose.material.icons.automirrored.filled.CallReceived
+import androidx.compose.material.icons.automirrored.filled.Message
 import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.CloudDone
@@ -33,16 +34,21 @@ import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.EditNote
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.PersonAdd
 import androidx.compose.material.icons.filled.Public
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -52,9 +58,14 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
@@ -68,7 +79,12 @@ import com.example.data.local.CallDirection
 import com.example.data.local.CallLogEntity
 import com.example.data.local.CallRecordingEntity
 import com.example.data.local.ContactEntity
+import com.example.telecom.ContactLinkedAccountsResolver
+import com.example.telecom.LinkedAccountAction
+import com.example.telecom.LinkedAccountGroup
+import com.example.telecom.LinkedActionKind
 import com.example.telecom.PhoneCountryResolver
+import com.example.telecom.extractSimCompanyName
 import com.example.ui.theme.AccentSkyBlue
 import com.example.ui.theme.CallAcceptGreen
 import com.example.ui.theme.CallEndRed
@@ -122,6 +138,7 @@ fun NumberCallHistoryDialog(
     onCallSim: (String) -> Unit,
     onAddContact: (() -> Unit)?,
     onTogglePlayback: (CallRecordingEntity) -> Unit,
+    onShareRecording: ((CallRecordingEntity) -> Unit)? = null,
     onReportSpam: (String) -> Unit,
     onDeleteLog: (Long) -> Unit,
     onEditNote: ((CallLogEntity) -> Unit)? = null
@@ -134,6 +151,18 @@ fun NumberCallHistoryDialog(
     val simNumber = matchedContact?.phoneNumber?.ifBlank { phoneNumber } ?: phoneNumber
     val callingCountry = remember(simNumber, phoneNumber) {
         PhoneCountryResolver.resolveCountryName(context, simNumber.ifBlank { phoneNumber })
+    }
+
+    var linkedAccounts by remember { mutableStateOf<List<LinkedAccountGroup>>(emptyList()) }
+    var isLoadingLinkedAccounts by remember { mutableStateOf(true) }
+    LaunchedEffect(simNumber, phoneNumber, matchedContact?.deviceContactId) {
+        isLoadingLinkedAccounts = true
+        linkedAccounts = ContactLinkedAccountsResolver.resolveLinkedAccounts(
+            context = context,
+            phoneNumber = simNumber.ifBlank { phoneNumber },
+            deviceContactId = matchedContact?.deviceContactId ?: 0L
+        )
+        isLoadingLinkedAccounts = false
     }
 
     val stats = remember(allLogsForNumber) {
@@ -167,7 +196,7 @@ fun NumberCallHistoryDialog(
                     title = {
                         Column {
                             Text(
-                                text = "Call History",
+                                text = if (matchedContact != null) "Contact Details" else "Number Details",
                                 style = MaterialTheme.typography.titleLarge,
                                 maxLines = 1
                             )
@@ -300,7 +329,25 @@ fun NumberCallHistoryDialog(
                                     verticalAlignment = Alignment.CenterVertically,
                                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                                 ) {
-                                    NetworkBadge(networkType = "SIM")
+                                    val latestSimCompany = remember(allLogsForNumber) {
+                                        allLogsForNumber.firstNotNullOfOrNull { entry ->
+                                            extractSimCompanyName(entry.routeLabel).takeIf { it.isNotBlank() }
+                                        }.orEmpty()
+                                    }
+                                    if (latestSimCompany.isNotBlank()) {
+                                        Surface(
+                                            shape = RoundedCornerShape(8.dp),
+                                            color = AccentSkyBlue.copy(alpha = 0.14f)
+                                        ) {
+                                            Text(
+                                                text = latestSimCompany,
+                                                style = MaterialTheme.typography.labelSmall,
+                                                fontWeight = FontWeight.SemiBold,
+                                                color = AccentSkyBlue,
+                                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                                            )
+                                        }
+                                    }
                                     if (latestMos > 0f) {
                                         MosBadge(mosScore = latestMos)
                                     }
@@ -322,15 +369,14 @@ fun NumberCallHistoryDialog(
                                         onClick = { onCallSim(simNumber) },
                                         modifier = Modifier
                                             .fillMaxWidth()
+                                            .height(48.dp)
                                             .testTag("history_call_sim_button")
                                     ) {
                                         Icon(
                                             imageVector = Icons.Filled.Call,
-                                            contentDescription = "Call SIM",
-                                            modifier = Modifier.size(18.dp)
+                                            contentDescription = "Call",
+                                            modifier = Modifier.size(22.dp)
                                         )
-                                        Spacer(Modifier.width(6.dp))
-                                        Text("SIM Call")
                                     }
                                 }
 
@@ -372,6 +418,17 @@ fun NumberCallHistoryDialog(
                                 }
                             }
                         }
+                    }
+
+                    // Linked Accounts Section (WhatsApp, imo, Telegram, Viber, Signal, etc.)
+                    item {
+                        LinkedAccountsCard(
+                            groups = linkedAccounts,
+                            isLoading = isLoadingLinkedAccounts,
+                            onActionClick = { action ->
+                                ContactLinkedAccountsResolver.launchLinkedAccountAction(context, action)
+                            }
+                        )
                     }
 
                     // Call Summary Metrics Strip
@@ -456,9 +513,218 @@ fun NumberCallHistoryDialog(
                                 hasRecording = linkedRec != null,
                                 isPlayingRecording = linkedRec != null && playingRecordingId == linkedRec.id,
                                 onToggleRecording = { linkedRec?.let(onTogglePlayback) },
+                                onShareRecording = if (linkedRec != null && onShareRecording != null) {
+                                    { onShareRecording(linkedRec) }
+                                } else {
+                                    null
+                                },
                                 onEditNote = onEditNote?.let { cb -> { cb(entry) } },
                                 onDelete = { onDeleteLog(entry.id) }
                             )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun LinkedAccountsCard(
+    groups: List<LinkedAccountGroup>,
+    isLoading: Boolean,
+    onActionClick: (LinkedAccountAction) -> Unit
+) {
+    Card(
+        shape = RoundedCornerShape(20.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceContainer
+        ),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f)),
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("linked_accounts_card")
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.Link,
+                    contentDescription = "Linked accounts",
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(18.dp)
+                )
+                Text(
+                    text = "Linked Accounts",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                if (groups.isNotEmpty()) {
+                    Surface(
+                        shape = RoundedCornerShape(999.dp),
+                        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.7f)
+                    ) {
+                        Text(
+                            text = "${groups.size}",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer,
+                            modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp)
+                        )
+                    }
+                }
+            }
+
+            when {
+                isLoading -> {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(16.dp),
+                            strokeWidth = 2.dp
+                        )
+                        Text(
+                            text = "Checking linked accounts (WhatsApp, imo, Telegram)...",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+
+                groups.isEmpty() -> {
+                    Text(
+                        text = "No linked messaging accounts (WhatsApp, imo, Telegram, Viber) found for this number on this device.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.testTag("linked_accounts_empty_text")
+                    )
+                }
+
+                else -> {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        groups.forEachIndexed { index, group ->
+                            if (index > 0) {
+                                HorizontalDivider(
+                                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f)
+                                )
+                            }
+                            val brandColor = Color(group.brand.primaryColorArgb)
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 2.dp)
+                                    .testTag("linked_account_row_${group.packageName}"),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                Surface(
+                                    shape = CircleShape,
+                                    color = brandColor.copy(alpha = 0.16f),
+                                    border = BorderStroke(1.dp, brandColor.copy(alpha = 0.45f)),
+                                    modifier = Modifier.size(40.dp)
+                                ) {
+                                    Box(contentAlignment = Alignment.Center) {
+                                        Text(
+                                            text = group.appName.take(2).uppercase(Locale.getDefault()),
+                                            style = MaterialTheme.typography.labelMedium,
+                                            fontWeight = FontWeight.Bold,
+                                            color = brandColor
+                                        )
+                                    }
+                                }
+
+                                Column(
+                                    modifier = Modifier.weight(1f),
+                                    verticalArrangement = Arrangement.spacedBy(2.dp)
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        Text(
+                                            text = group.appName,
+                                            style = MaterialTheme.typography.titleSmall,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = MaterialTheme.colorScheme.onSurface,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        if (group.isSyncedFromContacts) {
+                                            Surface(
+                                                shape = RoundedCornerShape(6.dp),
+                                                color = brandColor.copy(alpha = 0.16f)
+                                            ) {
+                                                Text(
+                                                    text = "Linked",
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    fontWeight = FontWeight.SemiBold,
+                                                    color = brandColor,
+                                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp)
+                                                )
+                                            }
+                                        }
+                                    }
+                                    Text(
+                                        text = group.actions.firstOrNull()?.actionLabel.orEmpty(),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(2.dp)
+                                ) {
+                                    group.actions.take(3).forEach { action ->
+                                        val actionIcon = when (action.actionKind) {
+                                            LinkedActionKind.VOICE_CALL -> Icons.Filled.Call
+                                            LinkedActionKind.VIDEO_CALL -> Icons.Filled.Videocam
+                                            LinkedActionKind.MESSAGE, LinkedActionKind.PROFILE -> Icons.AutoMirrored.Filled.Message
+                                        }
+                                        val actionDesc = when (action.actionKind) {
+                                            LinkedActionKind.VOICE_CALL -> "${group.appName} voice call"
+                                            LinkedActionKind.VIDEO_CALL -> "${group.appName} video call"
+                                            LinkedActionKind.MESSAGE, LinkedActionKind.PROFILE -> "Message on ${group.appName}"
+                                        }
+                                        IconButton(
+                                            onClick = { onActionClick(action) },
+                                            modifier = Modifier
+                                                .size(48.dp)
+                                                .testTag("linked_action_${action.id}")
+                                        ) {
+                                            Surface(
+                                                shape = CircleShape,
+                                                color = brandColor.copy(alpha = 0.15f),
+                                                modifier = Modifier.size(38.dp)
+                                            ) {
+                                                Box(contentAlignment = Alignment.Center) {
+                                                    Icon(
+                                                        imageVector = actionIcon,
+                                                        contentDescription = actionDesc,
+                                                        tint = brandColor,
+                                                        modifier = Modifier.size(18.dp)
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -473,6 +739,7 @@ private fun NumberHistoryRowCard(
     hasRecording: Boolean,
     isPlayingRecording: Boolean,
     onToggleRecording: () -> Unit,
+    onShareRecording: (() -> Unit)?,
     onEditNote: (() -> Unit)?,
     onDelete: () -> Unit
 ) {
@@ -542,7 +809,6 @@ private fun NumberHistoryRowCard(
                             MaterialTheme.colorScheme.onSurface
                         }
                     )
-                    NetworkBadge(networkType = entry.networkType)
                     if (entry.mosScore > 0f) {
                         MosBadge(mosScore = entry.mosScore)
                     }
@@ -560,13 +826,14 @@ private fun NumberHistoryRowCard(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+                val simCompany = remember(entry.routeLabel) { extractSimCompanyName(entry.routeLabel) }
                 Text(
                     text = buildString {
                         append(
                             if (entry.durationSec > 0L) "Duration ${formatDuration(entry.durationSec)}"
                             else "Unanswered / 00:00"
                         )
-                        if (entry.routeLabel.isNotBlank()) append(" • ${entry.routeLabel}")
+                        if (simCompany.isNotBlank()) append(" • $simCompany")
                     },
                     style = MonoMetricStyle,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -633,6 +900,21 @@ private fun NumberHistoryRowCard(
                             tint = MaterialTheme.colorScheme.primary,
                             modifier = Modifier.size(18.dp)
                         )
+                    }
+                    if (onShareRecording != null) {
+                        IconButton(
+                            onClick = onShareRecording,
+                            modifier = Modifier
+                                .size(40.dp)
+                                .testTag("history_share_recording_${entry.id}")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.Share,
+                                contentDescription = "Share call recording",
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(17.dp)
+                            )
+                        }
                     }
                 }
                 IconButton(

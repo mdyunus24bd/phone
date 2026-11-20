@@ -60,6 +60,7 @@ import androidx.compose.material.icons.filled.MicOff
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Public
+import androidx.compose.material.icons.filled.SimCard
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.SwapCalls
 import androidx.compose.material3.AlertDialog
@@ -111,13 +112,12 @@ import com.example.data.local.ContactEntity
 import com.example.telecom.CallRecordingAccessibilityService
 import com.example.telecom.PhoneCountryResolver
 import com.example.telecom.SpamRiskLevel
+import com.example.telecom.extractSimCompanyName
 import com.example.ui.components.AddConferenceCallerDialog
 import com.example.ui.components.ConferenceParticipantsDialog
 import com.example.ui.components.ContactAvatar
-import com.example.ui.components.EncryptionChip
 import com.example.ui.components.IncomingCallSlideControl
 import com.example.ui.components.MetricPill
-import com.example.ui.components.NetworkBadge
 import com.example.ui.components.QualityTrendChart
 import com.example.ui.components.SpamRiskChip
 import com.example.ui.components.formatDuration
@@ -269,6 +269,7 @@ fun ActiveCallOverlay(
     val currentMos = latestSample?.mosScore ?: 0f
     val mosColor = if (currentMos > 0f) mosQualityColor(currentMos) else AccentSkyBlue
     val lineAccent = SimAccentEmerald
+    val simCompanyName = remember(session.routeLabel) { extractSimCompanyName(session.routeLabel) }
 
     Box(
         modifier = Modifier
@@ -311,15 +312,43 @@ fun ActiveCallOverlay(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.SpaceBetween
             ) {
-                // Top Status Row
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.Center,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    NetworkBadge(networkType = "SIM")
-                    Spacer(Modifier.width(8.dp))
-                    EncryptionChip(label = "Carrier SIM")
+                // Top Status Row (shown only when a SIM carrier/company name is available)
+                if (simCompanyName.isNotBlank()) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.Center,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Surface(
+                            shape = RoundedCornerShape(999.dp),
+                            color = lineAccent.copy(alpha = 0.16f),
+                            border = BorderStroke(1.dp, lineAccent.copy(alpha = 0.45f)),
+                            modifier = Modifier.testTag("incoming_sim_company_badge")
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(5.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.SimCard,
+                                    contentDescription = "Carrier $simCompanyName",
+                                    tint = lineAccent,
+                                    modifier = Modifier.size(13.dp)
+                                )
+                                Text(
+                                    text = simCompanyName,
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = Color.White,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+                    }
+                } else {
+                    Spacer(Modifier.height(8.dp))
                 }
 
                 // Incoming Caller Identity Hero
@@ -458,41 +487,68 @@ fun ActiveCallOverlay(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(14.dp)
             ) {
-                // Top Status Row: Active Line Badge, Encryption, Live Recording Pill
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.Center,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    NetworkBadge(networkType = "SIM")
-                    Spacer(Modifier.width(8.dp))
-                    EncryptionChip(label = "Carrier SIM")
-                    if (session.isRecording) {
-                        Spacer(Modifier.width(8.dp))
-                        Surface(
-                            shape = RoundedCornerShape(999.dp),
-                            color = CallEndRed.copy(alpha = 0.24f),
-                            border = BorderStroke(1.dp, CallEndRed.copy(alpha = 0.6f)),
-                            modifier = Modifier.testTag("active_call_recording_pill")
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(5.dp)
+                // Top Status Row: SIM Company Name (when available) & Live Recording Pill
+                if (simCompanyName.isNotBlank() || session.isRecording) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        if (simCompanyName.isNotBlank()) {
+                            Surface(
+                                shape = RoundedCornerShape(999.dp),
+                                color = lineAccent.copy(alpha = 0.16f),
+                                border = BorderStroke(1.dp, lineAccent.copy(alpha = 0.45f)),
+                                modifier = Modifier.testTag("active_call_sim_company_badge")
                             ) {
-                                Icon(
-                                    imageVector = Icons.Filled.FiberManualRecord,
-                                    contentDescription = "Recording active",
-                                    tint = CallEndRed,
-                                    modifier = Modifier
-                                        .size(10.dp)
-                                        .alpha(recAlpha)
-                                )
-                                Text(
-                                    text = "${if (session.isAutoRecording) "AUTO REC" else "REC"} ${formatDuration(session.recordingSec)}",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = Color.White
-                                )
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(5.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Filled.SimCard,
+                                        contentDescription = "Carrier $simCompanyName",
+                                        tint = lineAccent,
+                                        modifier = Modifier.size(13.dp)
+                                    )
+                                    Text(
+                                        text = simCompanyName,
+                                        style = MaterialTheme.typography.labelMedium,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = Color.White,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                            }
+                        }
+                        if (session.isRecording) {
+                            Surface(
+                                shape = RoundedCornerShape(999.dp),
+                                color = CallEndRed.copy(alpha = 0.24f),
+                                border = BorderStroke(1.dp, CallEndRed.copy(alpha = 0.6f)),
+                                modifier = Modifier.testTag("active_call_recording_pill")
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(5.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Filled.FiberManualRecord,
+                                        contentDescription = "Recording active",
+                                        tint = CallEndRed,
+                                        modifier = Modifier
+                                            .size(10.dp)
+                                            .alpha(recAlpha)
+                                    )
+                                    Text(
+                                        text = "${if (session.isAutoRecording) "AUTO REC" else "REC"} ${formatDuration(session.recordingSec)}",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = Color.White
+                                    )
+                                }
                             }
                         }
                     }

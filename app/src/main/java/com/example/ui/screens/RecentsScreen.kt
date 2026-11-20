@@ -100,7 +100,6 @@ import com.example.data.local.SpamRuleEntity
 import com.example.telecom.PhoneCountryResolver
 import com.example.ui.components.ContactAvatar
 import com.example.ui.components.MosBadge
-import com.example.ui.components.NetworkBadge
 import com.example.ui.components.NumberCallHistoryDialog
 import com.example.ui.components.QuickCallNoteDialog
 import com.example.ui.components.formatDuration
@@ -140,6 +139,7 @@ fun RecentsScreen(
     onRequestDefaultDialer: () -> Unit,
     onEnableIncomingOverDisplay: () -> Unit = {},
     onTogglePlayback: (CallRecordingEntity) -> Unit,
+    onShareRecording: (CallRecordingEntity) -> Unit = {},
     onDeleteRecording: (CallRecordingEntity) -> Unit,
     onReportSpam: (String) -> Unit,
     onUnblockNumber: (SpamRuleEntity) -> Unit = {},
@@ -604,6 +604,7 @@ fun RecentsScreen(
                                 recording = rec,
                                 isPlaying = playingRecordingId == rec.id,
                                 onTogglePlayback = { onTogglePlayback(rec) },
+                                onShare = { onShareRecording(rec) },
                                 onCallBack = { onCallBack(rec.phoneNumber) },
                                 onDelete = { onDeleteRecording(rec) }
                             )
@@ -735,6 +736,7 @@ fun RecentsScreen(
                 null
             },
             onTogglePlayback = onTogglePlayback,
+            onShareRecording = onShareRecording,
             onReportSpam = onReportSpam,
             onDeleteLog = onDeleteLog,
             onEditNote = { entry -> noteTargetLog = entry }
@@ -1148,7 +1150,6 @@ private fun CallLogCard(
                         verticalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
                         SimSlotBadge(routeLabel = log.routeLabel, compact = false)
-                        NetworkBadge(networkType = log.networkType)
                         if (log.mosScore > 0f) {
                             MosBadge(mosScore = log.mosScore)
                         }

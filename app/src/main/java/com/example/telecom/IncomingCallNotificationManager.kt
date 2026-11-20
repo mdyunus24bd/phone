@@ -207,7 +207,7 @@ object IncomingCallNotificationManager {
         val displayTitle = callerName.ifBlank { phoneNumber.ifBlank { "Active Call" } }
         val countryName = PhoneCountryResolver.resolveCountryName(context, phoneNumber)
         val subtitle = buildString {
-            append(if (isHolding) "Call on hold" else "Ongoing SIM call")
+            append(if (isHolding) "Call on hold" else "Ongoing call")
             if (countryName.isNotBlank()) append(" • $countryName")
         }
 
