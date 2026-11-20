@@ -25,8 +25,10 @@ import com.example.data.local.CallTypeSummary
 import com.example.data.local.ContactEntity
 import com.example.data.local.SpamRuleEntity
 import com.example.data.local.VoxLineDatabase
+import com.example.data.preferences.AppFontSizeOption
 import com.example.data.preferences.AutoRecordMode
 import com.example.data.preferences.CallForwardingCondition
+import com.example.data.preferences.DialerSizeOption
 import com.example.data.preferences.KeypadLayoutStyle
 import com.example.data.preferences.UserPreferencesRepository
 import com.example.data.preferences.VoxLineSettings
@@ -336,6 +338,16 @@ class VoxLineViewModel(application: Application) : AndroidViewModel(application)
                         else -> matched?.displayName.orEmpty()
                     }
 
+                    val resolvedSimRoute = telecomBridge.resolveSimLabel(
+                        accountId = sysCall.phoneAccountId,
+                        accountLabel = sysCall.phoneAccountLabel,
+                        fallbackSlotIndex = if (sysCall.isIncoming) {
+                            TelecomBridge.DEFAULT_SIM_SLOT_INDEX
+                        } else {
+                            _selectedSimIndex.value
+                        }
+                    )
+
                     if (existing == null || !existing.isSystemTelecomCall) {
                         val assessment = if (sysCall.isConference) {
                             null
@@ -350,7 +362,7 @@ class VoxLineViewModel(application: Application) : AndroidViewModel(application)
                             address = sysCall.handle,
                             displayName = resolvedDisplayName,
                             networkType = "SIM",
-                            routeLabel = _activeSims.value.firstOrNull()?.displayName ?: "SIM Cellular",
+                            routeLabel = resolvedSimRoute,
                             isSystemTelecomCall = true,
                             isRinging = sysCall.isRinging,
                             isIncoming = sysCall.isIncoming,
@@ -387,6 +399,11 @@ class VoxLineViewModel(application: Application) : AndroidViewModel(application)
                             cur?.copy(
                                 address = sysCall.handle,
                                 displayName = if (primaryChanged) resolvedDisplayName else cur.displayName,
+                                routeLabel = if (sysCall.phoneAccountId.isNotBlank() || sysCall.phoneAccountLabel.isNotBlank()) {
+                                    resolvedSimRoute
+                                } else {
+                                    cur.routeLabel
+                                },
                                 photoUri = if (primaryChanged) matched?.photoUri.orEmpty() else cur.photoUri,
                                 isRinging = sysCall.isRinging,
                                 isOnHold = sysCall.isHolding,
@@ -1521,6 +1538,14 @@ class VoxLineViewModel(application: Application) : AndroidViewModel(application)
     }
     fun setAccentPalette(palette: AccentPalette) = viewModelScope.launch { prefsRepo.setAccentPalette(palette) }
     fun setHighContrast(enabled: Boolean) = viewModelScope.launch { prefsRepo.setHighContrast(enabled) }
+    fun setFontSizeOption(option: AppFontSizeOption) = viewModelScope.launch {
+        prefsRepo.setFontSizeOption(option)
+        showMessage("Font size: ${option.label} (${option.percentLabel})")
+    }
+    fun setDialerSizeOption(option: DialerSizeOption) = viewModelScope.launch {
+        prefsRepo.setDialerSizeOption(option)
+        showMessage("Dialer size: ${option.label}")
+    }
     fun setAutoRecord(enabled: Boolean) = viewModelScope.launch {
         prefsRepo.setAutoRecordCalls(enabled)
         showMessage(

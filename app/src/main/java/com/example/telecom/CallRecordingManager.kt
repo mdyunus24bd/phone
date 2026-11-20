@@ -85,6 +85,7 @@ class CallRecordingManager(
 ) {
     private val recorderMutex = Mutex()
     private val captureRunning = AtomicBoolean(false)
+    private val discardOnStop = AtomicBoolean(false)
     private val callbackExecutor = Executors.newSingleThreadExecutor()
 
     @Volatile
@@ -220,6 +221,7 @@ class CallRecordingManager(
                 noiseGatePeak = 20
             )
 
+            discardOnStop.set(false)
             captureRunning.set(true)
             val worker = Thread({
                 Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO)
@@ -600,7 +602,11 @@ class CallRecordingManager(
         } catch (_: Throwable) {
         } finally {
             _liveAudioLevel.value = 0f
-            runCatching { writer.finishAndClose() }
+            if (discardOnStop.get()) {
+                runCatching { writer.abortAndDelete() }
+            } else {
+                runCatching { writer.finishAndClose() }
+            }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 activeRecordingCallback?.let { cb ->
                     runCatching { audioRecord.unregisterAudioRecordingCallback(cb) }
@@ -697,6 +703,7 @@ class CallRecordingManager(
     }
 
     private fun stopCaptureResourcesLocked(discardActiveFile: Boolean) {
+        discardOnStop.set(discardActiveFile)
         captureRunning.set(false)
         val record = activeAudioRecord
         if (record != null) {

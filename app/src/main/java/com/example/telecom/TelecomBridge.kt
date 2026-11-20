@@ -13,6 +13,7 @@ import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import android.telecom.PhoneAccount
+import android.telecom.PhoneAccountHandle
 import android.telecom.TelecomManager
 import android.telephony.SubscriptionManager
 import androidx.core.content.ContextCompat
@@ -24,6 +25,102 @@ data class SimSlotInfo(
     val carrierName: String,
     val isSystemDefault: Boolean = false
 )
+
+/**
+ * Snapshot of active SIM subscriptions and Telecom PhoneAccountHandles used to resolve
+ * which SIM slot (e.g. "SIM 1" / "SIM 2") handled a live or logged call without repeated IPC.
+ */
+class SimAccountLookup(
+    private val activeSims: List<SimSlotInfo>,
+    private val iccIdBySubId: Map<Int, String>,
+    private val phoneAccountIdsInOrder: List<String>,
+    private val phoneAccountLabelsById: Map<String, String>
+) {
+    fun resolve(
+        accountId: String?,
+        accountLabel: String? = null,
+        fallbackSlotIndex: Int = TelecomBridge.DEFAULT_SIM_SLOT_INDEX
+    ): String {
+        val rawId = accountId?.trim().orEmpty()
+        val rawLabel = accountLabel?.trim().orEmpty()
+
+        // 1. Direct match by Subscription ID or ICCID
+        if (rawId.isNotEmpty()) {
+            activeSims.firstOrNull { sim ->
+                val subIdStr = sim.subscriptionId.toString()
+                val iccId = iccIdBySubId[sim.subscriptionId].orEmpty()
+                rawId.equals(subIdStr, ignoreCase = true) ||
+                    (iccId.isNotEmpty() && (
+                        rawId.equals(iccId, ignoreCase = true) ||
+                            rawId.startsWith(iccId, ignoreCase = true) ||
+                            iccId.startsWith(rawId, ignoreCase = true)
+                        ))
+            }?.let { return formatSimLabel(it) }
+
+            // 2. Match against TelecomManager.callCapablePhoneAccounts ordering
+            val handleIdx = phoneAccountIdsInOrder.indexOfFirst { it.equals(rawId, ignoreCase = true) }
+            if (handleIdx >= 0) {
+                activeSims.getOrNull(handleIdx)?.let { return formatSimLabel(it) }
+                return "SIM ${handleIdx + 1}"
+            }
+
+            // 3. Match against PhoneAccount label resolved from TelecomManager
+            val mappedLabel = phoneAccountLabelsById[rawId].orEmpty()
+            matchSimByText(mappedLabel)?.let { return it }
+
+            // 4. Match explicit slot hints in accountId (e.g. "0", "1", "SIM1", "SIM 2")
+            matchSimByText(rawId)?.let { return it }
+        }
+
+        // 5. Match against caller-supplied PhoneAccount label
+        if (rawLabel.isNotEmpty()) {
+            matchSimByText(rawLabel)?.let { return it }
+        }
+
+        // 6. Fallback to explicit selected slot or default / single active SIM
+        if (fallbackSlotIndex >= 0) {
+            activeSims.firstOrNull { it.slotIndex == fallbackSlotIndex }?.let { return formatSimLabel(it) }
+            activeSims.getOrNull(fallbackSlotIndex)?.let { return formatSimLabel(it) }
+            return "SIM ${fallbackSlotIndex + 1}"
+        }
+
+        if (activeSims.size == 1) {
+            return formatSimLabel(activeSims.first())
+        }
+        activeSims.firstOrNull { it.isSystemDefault }?.let { return formatSimLabel(it) }
+        activeSims.firstOrNull()?.let { return formatSimLabel(it) }
+
+        return "SIM 1"
+    }
+
+    private fun matchSimByText(text: String): String? {
+        if (text.isBlank()) return null
+        val lower = text.lowercase()
+        activeSims.firstOrNull { sim ->
+            sim.carrierName.isNotBlank() && lower.contains(sim.carrierName.lowercase())
+        }?.let { return formatSimLabel(it) }
+
+        return when {
+            lower == "0" || lower.contains("sim 1") || lower.contains("sim1") || lower.contains("slot 1") -> {
+                activeSims.firstOrNull { it.slotIndex == 0 }?.let { formatSimLabel(it) } ?: "SIM 1"
+            }
+            lower == "1" || lower.contains("sim 2") || lower.contains("sim2") || lower.contains("slot 2") -> {
+                activeSims.firstOrNull { it.slotIndex == 1 }?.let { formatSimLabel(it) } ?: "SIM 2"
+            }
+            else -> null
+        }
+    }
+
+    companion object {
+        fun formatSimLabel(sim: SimSlotInfo): String {
+            return if (sim.carrierName.isNotBlank()) {
+                "${sim.displayName} • ${sim.carrierName}"
+            } else {
+                sim.displayName
+            }
+        }
+    }
+}
 
 class TelecomBridge(private val context: Context) {
 
@@ -112,6 +209,65 @@ class TelecomBridge(private val context: Context) {
         } catch (_: Exception) {
             emptyList()
         }
+    }
+
+    /**
+     * Builds a lookup table mapping Telecom PhoneAccount IDs / Subscription IDs / ICCIDs
+     * to human-readable SIM slot labels (e.g. "SIM 1", "SIM 2", or "SIM 1 • Carrier").
+     */
+    @SuppressLint("MissingPermission")
+    fun buildSimAccountLookup(): SimAccountLookup {
+        val sims = detectActiveSims()
+        val iccMap = mutableMapOf<Int, String>()
+        val handleIds = mutableListOf<String>()
+        val handleLabels = mutableMapOf<String, String>()
+
+        if (hasPhoneStatePermission()) {
+            runCatching {
+                val subManager = context.getSystemService(Context.TELEPHONY_SUBSCRIPTION_SERVICE) as? SubscriptionManager
+                subManager?.activeSubscriptionInfoList.orEmpty().forEach { info ->
+                    val icc = runCatching { info.iccId?.trim().orEmpty() }.getOrDefault("")
+                    if (icc.isNotEmpty()) {
+                        iccMap[info.subscriptionId] = icc
+                    }
+                }
+            }
+            runCatching {
+                val telecom = context.getSystemService(Context.TELECOM_SERVICE) as? TelecomManager
+                val handles: List<PhoneAccountHandle> = telecom?.callCapablePhoneAccounts.orEmpty()
+                handles.forEach { handle ->
+                    val id = handle.id?.trim().orEmpty()
+                    if (id.isNotEmpty()) {
+                        handleIds.add(id)
+                        val label = runCatching {
+                            telecom?.getPhoneAccount(handle)?.label?.toString()?.trim().orEmpty()
+                        }.getOrDefault("")
+                        if (label.isNotEmpty()) {
+                            handleLabels[id] = label
+                        }
+                    }
+                }
+            }
+        }
+
+        return SimAccountLookup(
+            activeSims = sims,
+            iccIdBySubId = iccMap,
+            phoneAccountIdsInOrder = handleIds,
+            phoneAccountLabelsById = handleLabels
+        )
+    }
+
+    fun resolveSimLabel(
+        accountId: String?,
+        accountLabel: String? = null,
+        fallbackSlotIndex: Int = DEFAULT_SIM_SLOT_INDEX
+    ): String {
+        return buildSimAccountLookup().resolve(
+            accountId = accountId,
+            accountLabel = accountLabel,
+            fallbackSlotIndex = fallbackSlotIndex
+        )
     }
 
     /**

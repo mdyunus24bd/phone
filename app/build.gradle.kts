@@ -13,7 +13,7 @@ android {
   compileSdk { version = release(36) { minorApiLevel = 1 } }
 
   defaultConfig {
-    applicationId = "com.aistudio.voxline.k7m4px.mdboqs"
+    applicationId = "com.voxline.yunus"
     minSdk = 24
     targetSdk = 36
     versionCode = 1

@@ -10,10 +10,14 @@ import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.remember
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.unit.Density
 import androidx.core.view.WindowCompat
 
 enum class ThemeMode(val label: String) {
@@ -157,6 +161,7 @@ fun VoxLineTheme(
     themeMode: ThemeMode = ThemeMode.DARK,
     accentPalette: AccentPalette = AccentPalette.EMERALD,
     highContrast: Boolean = false,
+    fontScaleMultiplier: Float = 1.0f,
     content: @Composable () -> Unit
 ) {
     val systemDark = isSystemInDarkTheme()
@@ -200,9 +205,19 @@ fun VoxLineTheme(
         }
     }
 
-    MaterialTheme(
-        colorScheme = colorScheme,
-        typography = VoxLineTypography,
-        content = content
-    )
+    val baseDensity = LocalDensity.current
+    val scaledDensity = remember(baseDensity, fontScaleMultiplier) {
+        Density(
+            density = baseDensity.density,
+            fontScale = (baseDensity.fontScale * fontScaleMultiplier).coerceIn(0.75f, 2.0f)
+        )
+    }
+
+    CompositionLocalProvider(LocalDensity provides scaledDensity) {
+        MaterialTheme(
+            colorScheme = colorScheme,
+            typography = VoxLineTypography,
+            content = content
+        )
+    }
 }

@@ -28,6 +28,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.FiberManualRecord
+import androidx.compose.material.icons.filled.FormatSize
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.NetworkCheck
 import androidx.compose.material.icons.filled.NotificationsActive
@@ -65,8 +66,10 @@ import com.example.data.local.CallLogEntity
 import com.example.data.local.CallRecordingEntity
 import com.example.data.local.ContactEntity
 import com.example.data.local.SpamRuleEntity
+import com.example.data.preferences.AppFontSizeOption
 import com.example.data.preferences.AutoRecordMode
 import com.example.data.preferences.CallForwardingCondition
+import com.example.data.preferences.DialerSizeOption
 import com.example.data.preferences.KeypadLayoutStyle
 import com.example.data.preferences.VoxLineSettings
 import com.example.security.CryptoVault
@@ -144,6 +147,8 @@ fun ControlCenterScreen(
     onSetThemeMode: (ThemeMode) -> Unit,
     onSetAccentPalette: (AccentPalette) -> Unit,
     onSetHighContrast: (Boolean) -> Unit,
+    onSetFontSizeOption: (AppFontSizeOption) -> Unit,
+    onSetDialerSizeOption: (DialerSizeOption) -> Unit,
     onSetKeypadLayout: (KeypadLayoutStyle) -> Unit,
     onSetScreenPrivacy: (Boolean) -> Unit,
     onSetDtmfTones: (Boolean) -> Unit,
@@ -296,6 +301,62 @@ fun ControlCenterScreen(
                     }
                 }
 
+                // Quick Entry Card for Font Size & Dialer Size
+                item {
+                    Surface(
+                        shape = RoundedCornerShape(18.dp),
+                        color = MaterialTheme.colorScheme.surfaceContainer,
+                        tonalElevation = 1.dp,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(18.dp))
+                            .clickable { onSelectTab(ControlTab.PRIVACY_THEME) }
+                            .testTag("open_font_dialer_size_settings_card")
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 14.dp, vertical = 14.dp),
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(42.dp)
+                                    .clip(CircleShape)
+                                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.FormatSize,
+                                    contentDescription = "Font and Dialer Size",
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(22.dp)
+                                )
+                            }
+                            Column(
+                                modifier = Modifier.weight(1f),
+                                verticalArrangement = Arrangement.spacedBy(2.dp)
+                            ) {
+                                Text(
+                                    text = "Font & Dialer Size",
+                                    style = MaterialTheme.typography.titleMedium
+                                )
+                                Text(
+                                    text = "Font: ${settings.fontSizeOption.label} (${settings.fontSizeOption.percentLabel}) • Dialer: ${settings.dialerSizeOption.label}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                                contentDescription = "Open Font and Dialer Size settings",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+
                 // Section Selector Chips
                 item {
                     LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -380,6 +441,8 @@ fun ControlCenterScreen(
                             onSetThemeMode = onSetThemeMode,
                             onSetAccentPalette = onSetAccentPalette,
                             onSetHighContrast = onSetHighContrast,
+                            onSetFontSizeOption = onSetFontSizeOption,
+                            onSetDialerSizeOption = onSetDialerSizeOption,
                             onSetKeypadLayout = onSetKeypadLayout,
                             onSetScreenPrivacy = onSetScreenPrivacy,
                             onSetDtmfTones = onSetDtmfTones,

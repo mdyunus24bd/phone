@@ -28,8 +28,26 @@ enum class AutoRecordMode(val label: String, val description: String) {
 enum class KeypadLayoutStyle(val label: String, val subtitle: String) {
     CIRCULAR_MODERN("Modern Circular", "Sculpted round tonal dial keys"),
     COMPACT_TACTILE("Compact Grid", "Condensed grid with extra contact space"),
+    MINIMAL_CLEAN("Minimal Clean", "Borderless floating digits with hairline dividers"),
+    ACCENT_RING("Accent Ring", "Crisp outlined circular rings with accent glow"),
+    SOFT_CAPSULE("Soft Capsule", "Wide ergonomic pill-shaped keys"),
+    CLASSIC_BOARD("Classic Phone", "Framed tactile 3x4 phone keypad board"),
     ONE_HANDED_RIGHT("One-Handed (Right)", "Thumb-shifted right-hand ergonomic pad"),
     ONE_HANDED_LEFT("One-Handed (Left)", "Thumb-shifted left-hand ergonomic pad")
+}
+
+enum class AppFontSizeOption(val label: String, val scale: Float, val percentLabel: String) {
+    SMALL("Small", 0.88f, "88%"),
+    NORMAL("Normal", 1.0f, "100%"),
+    LARGE("Large", 1.15f, "115%"),
+    EXTRA_LARGE("Extra Large", 1.30f, "130%")
+}
+
+enum class DialerSizeOption(val label: String, val subtitle: String, val scale: Float) {
+    SMALL("Compact", "Smaller keys with extra space for recent calls", 0.84f),
+    MEDIUM("Normal", "Balanced everyday keypad size", 1.0f),
+    LARGE("Large", "Bigger keys for comfortable dialing", 1.14f),
+    EXTRA_LARGE("Extra Large", "Maximum key size for easy tapping", 1.26f)
 }
 
 enum class CallForwardingCondition(val label: String, val mmiPrefix: String, val deactivateCode: String) {
@@ -63,6 +81,8 @@ data class VoxLineSettings(
     val themeMode: ThemeMode = ThemeMode.LIGHT,
     val accentPalette: AccentPalette = AccentPalette.EMERALD,
     val highContrast: Boolean = false,
+    val fontSizeOption: AppFontSizeOption = AppFontSizeOption.NORMAL,
+    val dialerSizeOption: DialerSizeOption = DialerSizeOption.MEDIUM,
     val autoRecordCalls: Boolean = false,
     val autoRecordMode: AutoRecordMode = AutoRecordMode.ALL_CALLS,
     val autoRecordNumbers: Set<String> = emptySet(),
@@ -85,6 +105,8 @@ class UserPreferencesRepository(private val context: Context) {
         val THEME_MODE = stringPreferencesKey("theme_mode")
         val ACCENT_PALETTE = stringPreferencesKey("accent_palette")
         val HIGH_CONTRAST = booleanPreferencesKey("high_contrast")
+        val FONT_SIZE_OPTION = stringPreferencesKey("font_size_option")
+        val DIALER_SIZE_OPTION = stringPreferencesKey("dialer_size_option")
         val AUTO_RECORD = booleanPreferencesKey("auto_record")
         val AUTO_RECORD_MODE = stringPreferencesKey("auto_record_mode")
         val AUTO_RECORD_NUMBERS = stringSetPreferencesKey("auto_record_numbers")
@@ -124,6 +146,12 @@ class UserPreferencesRepository(private val context: Context) {
             accentPalette = prefs[Keys.ACCENT_PALETTE]?.let { runCatching { AccentPalette.valueOf(it) }.getOrNull() }
                 ?: AccentPalette.EMERALD,
             highContrast = prefs[Keys.HIGH_CONTRAST] ?: false,
+            fontSizeOption = prefs[Keys.FONT_SIZE_OPTION]?.let {
+                runCatching { AppFontSizeOption.valueOf(it) }.getOrNull()
+            } ?: AppFontSizeOption.NORMAL,
+            dialerSizeOption = prefs[Keys.DIALER_SIZE_OPTION]?.let {
+                runCatching { DialerSizeOption.valueOf(it) }.getOrNull()
+            } ?: DialerSizeOption.MEDIUM,
             autoRecordCalls = prefs[Keys.AUTO_RECORD] ?: false,
             autoRecordMode = prefs[Keys.AUTO_RECORD_MODE]?.let {
                 runCatching { AutoRecordMode.valueOf(it) }.getOrNull()
@@ -185,6 +213,14 @@ class UserPreferencesRepository(private val context: Context) {
 
     suspend fun setHighContrast(enabled: Boolean) {
         context.voxLineDataStore.edit { it[Keys.HIGH_CONTRAST] = enabled }
+    }
+
+    suspend fun setFontSizeOption(option: AppFontSizeOption) {
+        context.voxLineDataStore.edit { it[Keys.FONT_SIZE_OPTION] = option.name }
+    }
+
+    suspend fun setDialerSizeOption(option: DialerSizeOption) {
+        context.voxLineDataStore.edit { it[Keys.DIALER_SIZE_OPTION] = option.name }
     }
 
     suspend fun setAutoRecordCalls(enabled: Boolean) {

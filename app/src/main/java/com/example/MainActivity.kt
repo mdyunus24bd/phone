@@ -131,7 +131,8 @@ class MainActivity : ComponentActivity() {
             VoxLineTheme(
                 themeMode = settings.themeMode,
                 accentPalette = settings.accentPalette,
-                highContrast = settings.highContrast
+                highContrast = settings.highContrast,
+                fontScaleMultiplier = settings.fontSizeOption.scale
             ) {
                 VoxLineRootApp(
                     viewModel = viewModel,
@@ -564,6 +565,7 @@ private fun VoxLineRootApp(
                             VoxDestination.RECENTS -> RecentsScreen(
                                 callLogs = callLogs,
                                 contacts = contacts,
+                                spamRules = spamRules,
                                 isDefaultDialer = isDefaultDialer,
                                 canShowIncomingOverDisplay = canShowIncomingOverDisplay,
                                 recordings = recordings,
@@ -571,8 +573,6 @@ private fun VoxLineRootApp(
                                 hasCallLogPermission = hasCallLogPermission,
                                 isSyncingCallLogs = isSyncingCallLogs,
                                 lastAutoSyncTimestamp = lastCallLogsAutoSyncAt,
-                                lastSyncTimestamp = settings.lastSyncTimestamp,
-                                lastSyncChecksum = settings.lastSyncChecksum,
                                 onCallBack = { number ->
                                     viewModel.startCall(number)
                                 },
@@ -590,22 +590,10 @@ private fun VoxLineRootApp(
                                 onReportSpam = { num ->
                                     viewModel.addSpamRule(num, "Reported Spam", 95, true)
                                 },
+                                onUnblockNumber = viewModel::unblockPhoneNumber,
+                                onOpenBlockedNumbers = { showBlockedNumbersScreen = true },
                                 onDeleteLog = viewModel::deleteCallLog,
                                 onSaveCallNote = viewModel::saveCallLogNote,
-                                onSyncSystemCallLog = {
-                                    if (ContextCompat.checkSelfPermission(
-                                            context,
-                                            Manifest.permission.READ_CALL_LOG
-                                        ) == PackageManager.PERMISSION_GRANTED
-                                    ) {
-                                        viewModel.syncSystemCallLogs()
-                                    } else {
-                                        readCallLogPermLauncher.launch(Manifest.permission.READ_CALL_LOG)
-                                    }
-                                },
-                                onOpenEncryptedSync = {
-                                    openSettingsAtTab(ControlTab.PRIVACY_THEME)
-                                },
                                 onOpenRecordingSettings = {
                                     openSettingsAtTab(ControlTab.RECORDING)
                                 },
@@ -669,11 +657,13 @@ private fun VoxLineRootApp(
                 activeSims = activeSims,
                 contacts = contacts,
                 callLogs = callLogs,
+                spamRules = spamRules,
                 isDefaultDialer = isDefaultDialer,
                 hasPhoneStatePermission = hasPhoneStatePermission,
                 spamAssessment = dialerSpam,
                 themeMode = settings.themeMode,
                 keypadLayout = settings.keypadLayout,
+                dialerSize = settings.dialerSizeOption,
                 autoRecordEnabled = settings.autoRecordCalls,
                 autoRecordMode = settings.autoRecordMode,
                 autoRecordSpecificCount = settings.autoRecordNumbers.size,
@@ -683,6 +673,7 @@ private fun VoxLineRootApp(
                 onClear = viewModel::clearDialInput,
                 onSelectSimIndex = viewModel::selectSimSlot,
                 onSelectKeypadLayout = viewModel::setKeypadLayout,
+                onSelectDialerSize = viewModel::setDialerSizeOption,
                 onToggleLightDarkTheme = viewModel::toggleLightDarkTheme,
                 onRequestDefaultDialer = requestDefaultDialerAction,
                 onRequestPhonePermissions = {
@@ -709,6 +700,18 @@ private fun VoxLineRootApp(
                 },
                 onOpenRecordingSettings = {
                     openSettingsAtTab(ControlTab.RECORDING)
+                },
+                onNavigateToFavorites = {
+                    showKeypadPage = false
+                    currentDestination = VoxDestination.FAVORITES
+                },
+                onNavigateToRecents = {
+                    showKeypadPage = false
+                    currentDestination = VoxDestination.RECENTS
+                },
+                onNavigateToContacts = {
+                    showKeypadPage = false
+                    currentDestination = VoxDestination.CONTACTS
                 },
                 onBack = { showKeypadPage = false }
             )
@@ -814,6 +817,8 @@ private fun VoxLineRootApp(
                 onSetThemeMode = viewModel::setThemeMode,
                 onSetAccentPalette = viewModel::setAccentPalette,
                 onSetHighContrast = viewModel::setHighContrast,
+                onSetFontSizeOption = viewModel::setFontSizeOption,
+                onSetDialerSizeOption = viewModel::setDialerSizeOption,
                 onSetKeypadLayout = viewModel::setKeypadLayout,
                 onSetScreenPrivacy = viewModel::setScreenPrivacy,
                 onSetDtmfTones = viewModel::setDtmfTones,

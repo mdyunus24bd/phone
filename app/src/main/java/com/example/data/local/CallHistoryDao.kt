@@ -73,6 +73,9 @@ interface CallHistoryDao {
     @Query("UPDATE call_logs SET quickNote = :note WHERE id = :id")
     suspend fun updateQuickNote(id: Long, note: String)
 
+    @Query("UPDATE call_logs SET routeLabel = :routeLabel WHERE id = :id")
+    suspend fun updateRouteLabel(id: Long, routeLabel: String)
+
     @Query("DELETE FROM call_logs WHERE id = :id")
     suspend fun deleteById(id: Long)
 

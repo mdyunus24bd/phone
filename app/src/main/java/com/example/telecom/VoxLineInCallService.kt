@@ -1,10 +1,12 @@
 package com.example.telecom
 
+import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.telecom.Call
 import android.telecom.CallAudioState
 import android.telecom.InCallService
+import android.telecom.TelecomManager
 import com.example.MainActivity
 import com.example.data.local.CallDirection
 import com.example.data.local.CallLogEntity
@@ -51,7 +53,9 @@ data class SystemTelecomCallSnapshot(
     val conferenceParticipants: List<ConferenceParticipantSnapshot> = emptyList(),
     val secondaryCall: SecondaryCallSnapshot? = null,
     val canMergeCalls: Boolean = false,
-    val canSwapCalls: Boolean = false
+    val canSwapCalls: Boolean = false,
+    val phoneAccountId: String = "",
+    val phoneAccountLabel: String = ""
 )
 
 /**
@@ -419,6 +423,17 @@ object ActiveTelecomCallBus {
             else -> "Unknown"
         }
 
+        val accountHandle = primary.details?.accountHandle
+        val phoneAccountId = accountHandle?.id?.trim().orEmpty()
+        val phoneAccountLabel = if (accountHandle != null) {
+            runCatching {
+                val telecom = activeService?.getSystemService(Context.TELECOM_SERVICE) as? TelecomManager
+                telecom?.getPhoneAccount(accountHandle)?.label?.toString()?.trim().orEmpty()
+            }.getOrDefault("")
+        } else {
+            ""
+        }
+
         _systemCall.value = SystemTelecomCallSnapshot(
             handle = effectiveHandle,
             state = state,
@@ -433,7 +448,9 @@ object ActiveTelecomCallBus {
             conferenceParticipants = participants,
             secondaryCall = secondarySnap,
             canMergeCalls = canMerge,
-            canSwapCalls = canSwap
+            canSwapCalls = canSwap,
+            phoneAccountId = phoneAccountId,
+            phoneAccountLabel = phoneAccountLabel
         )
     }
 }

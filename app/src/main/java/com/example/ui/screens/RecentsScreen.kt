@@ -60,12 +60,9 @@ import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.Stop
-import androidx.compose.material.icons.filled.Sync
-import androidx.compose.material.icons.filled.SyncLock
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -99,6 +96,7 @@ import com.example.data.local.CallDirection
 import com.example.data.local.CallLogEntity
 import com.example.data.local.CallRecordingEntity
 import com.example.data.local.ContactEntity
+import com.example.data.local.SpamRuleEntity
 import com.example.telecom.PhoneCountryResolver
 import com.example.ui.components.ContactAvatar
 import com.example.ui.components.MosBadge
@@ -129,6 +127,7 @@ private enum class RecentsFilter(val label: String) {
 fun RecentsScreen(
     callLogs: List<CallLogEntity>,
     contacts: List<ContactEntity>,
+    spamRules: List<SpamRuleEntity> = emptyList(),
     isDefaultDialer: Boolean,
     canShowIncomingOverDisplay: Boolean = true,
     recordings: List<CallRecordingEntity>,
@@ -136,8 +135,6 @@ fun RecentsScreen(
     hasCallLogPermission: Boolean,
     isSyncingCallLogs: Boolean,
     lastAutoSyncTimestamp: Long,
-    lastSyncTimestamp: Long,
-    lastSyncChecksum: String,
     onCallBack: (String) -> Unit,
     onOpenAddContact: (phoneNumber: String, prefillName: String) -> Unit,
     onRequestDefaultDialer: () -> Unit,
@@ -145,10 +142,10 @@ fun RecentsScreen(
     onTogglePlayback: (CallRecordingEntity) -> Unit,
     onDeleteRecording: (CallRecordingEntity) -> Unit,
     onReportSpam: (String) -> Unit,
+    onUnblockNumber: (SpamRuleEntity) -> Unit = {},
+    onOpenBlockedNumbers: () -> Unit = {},
     onDeleteLog: (Long) -> Unit,
     onSaveCallNote: (Long, String) -> Unit = { _, _ -> },
-    onSyncSystemCallLog: () -> Unit,
-    onOpenEncryptedSync: () -> Unit,
     onOpenRecordingSettings: () -> Unit,
     onOpenSettings: () -> Unit,
     modifier: Modifier = Modifier
@@ -156,8 +153,8 @@ fun RecentsScreen(
     var selectedFilter by remember { mutableStateOf(RecentsFilter.ALL) }
     var historyTargetLog by remember { mutableStateOf<CallLogEntity?>(null) }
     var noteTargetLog by remember { mutableStateOf<CallLogEntity?>(null) }
-    var expandedLogId by remember { mutableStateOf<Long?>(null) }
-    var openSwipeLogId by remember { mutableStateOf<Long?>(null) }
+    var expandedNumberKey by remember { mutableStateOf<String?>(null) }
+    var openSwipeNumberKey by remember { mutableStateOf<String?>(null) }
     val recordingsById = remember(recordings) { recordings.associateBy { it.id } }
     val contactsById = remember(contacts) { contacts.associateBy { it.id } }
     val contactsByDigits = remember(contacts) {
@@ -166,20 +163,40 @@ fun RecentsScreen(
             if (d.isNotEmpty()) d to c else null
         }.toMap()
     }
-    val callsCountByNumberKey = remember(callLogs) {
-        callLogs.groupingBy { normalizeCallHistoryKey(it.phoneNumber) }.eachCount()
+
+    val blockedRules = remember(spamRules) {
+        spamRules.filter { it.autoBlock }
     }
 
-    val filteredLogs = remember(callLogs, selectedFilter) {
-        when (selectedFilter) {
-            RecentsFilter.ALL -> callLogs
-            RecentsFilter.MISSED -> callLogs.filter { it.direction == CallDirection.MISSED }
-            RecentsFilter.NOTES -> callLogs.filter { it.quickNote.isNotBlank() }
-            RecentsFilter.RECORDED -> callLogs.filter { it.recordingId != null }
-            RecentsFilter.BLOCKED -> callLogs.filter {
-                it.direction == CallDirection.BLOCKED || it.spamScore >= 50
-            }
-        }
+    // Separate regular recent calls from spam & blocked calls so spam/blocked appear ONLY in Spam menu
+    val recentOnlyLogs = remember(callLogs, blockedRules) {
+        callLogs.filterNot { isSpamOrBlockedCallLog(it, blockedRules) }
+    }
+    val spamOnlyLogs = remember(callLogs, blockedRules) {
+        callLogs.filter { isSpamOrBlockedCallLog(it, blockedRules) }
+    }
+
+    // Deduplicated groups: each phone number appears ONLY ONCE
+    val allRecentGroups = remember(recentOnlyLogs) {
+        groupCallLogsByUniqueNumber(recentOnlyLogs, preferLatestMissedAsRepresentative = false)
+    }
+    val missedRecentGroups = remember(recentOnlyLogs) {
+        groupCallLogsByUniqueNumber(recentOnlyLogs, preferLatestMissedAsRepresentative = true)
+            .filter { it.missedCalls > 0 }
+    }
+    val spamCallGroups = remember(spamOnlyLogs) {
+        groupCallLogsByUniqueNumber(spamOnlyLogs, preferLatestMissedAsRepresentative = false)
+    }
+    val notedLogs = remember(recentOnlyLogs) {
+        recentOnlyLogs
+            .filter { it.quickNote.isNotBlank() }
+            .sortedByDescending { it.timestamp }
+    }
+
+    val spamTotalCount = remember(blockedRules, spamCallGroups) {
+        val ruleKeys = blockedRules.map { normalizeCallHistoryKey(it.pattern) }.toSet()
+        val extraCallKeys = spamCallGroups.count { it.numberKey !in ruleKeys }
+        blockedRules.size + extraCallKeys
     }
 
     Box(
@@ -210,8 +227,6 @@ fun RecentsScreen(
                                 hasCallLogPermission && lastAutoSyncTimestamp > 0L ->
                                     "Auto-Sync Active • Updated ${formatTimestamp(lastAutoSyncTimestamp)}"
                                 hasCallLogPermission -> "Auto-Sync Active • Tap number for options • Slide left to delete"
-                                lastSyncTimestamp > 0L ->
-                                    "Vault Synced ${formatTimestamp(lastSyncTimestamp)} • #$lastSyncChecksum"
                                 else -> "Tap number for options • Slide left to delete"
                             },
                             style = MaterialTheme.typography.bodySmall,
@@ -371,261 +386,323 @@ fun RecentsScreen(
                 }
             }
 
-            // Quick Sync Actions Row
-            item {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    FilledTonalButton(
-                        onClick = onSyncSystemCallLog,
-                        enabled = !isSyncingCallLogs,
-                        modifier = Modifier
-                            .weight(1f)
-                            .testTag("sync_device_logs_button")
-                    ) {
-                        if (isSyncingCallLogs) {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(16.dp),
-                                strokeWidth = 2.dp
-                            )
-                        } else {
-                            Icon(
-                                imageVector = Icons.Filled.Sync,
-                                contentDescription = "Sync device call log",
-                                modifier = Modifier.size(18.dp)
-                            )
-                        }
-                        Spacer(Modifier.width(6.dp))
-                        Text(
-                            text = when {
-                                isSyncingCallLogs -> "Syncing..."
-                                hasCallLogPermission -> "Sync Now"
-                                else -> "Enable Auto-Sync"
-                            },
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
-                    OutlinedButton(
-                        onClick = onOpenEncryptedSync,
-                        modifier = Modifier
-                            .weight(1f)
-                            .testTag("open_cross_device_sync_button")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Filled.SyncLock,
-                            contentDescription = "Encrypted cross-device sync",
-                            modifier = Modifier.size(18.dp)
-                        )
-                        Spacer(Modifier.width(6.dp))
-                        Text("Sync Vault", maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    }
-                }
-            }
-
             // Filter Chips
             item {
                 LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     items(RecentsFilter.entries) { filter ->
+                        val badgeCount = when (filter) {
+                            RecentsFilter.ALL -> allRecentGroups.size
+                            RecentsFilter.MISSED -> missedRecentGroups.size
+                            RecentsFilter.NOTES -> notedLogs.size
+                            RecentsFilter.RECORDED -> recordings.size
+                            RecentsFilter.BLOCKED -> spamTotalCount
+                        }
                         FilterChip(
                             selected = selectedFilter == filter,
-                            onClick = { selectedFilter = filter },
-                            label = { Text(filter.label) }
+                            onClick = {
+                                selectedFilter = filter
+                                expandedNumberKey = null
+                                openSwipeNumberKey = null
+                            },
+                            label = {
+                                Text(
+                                    if (badgeCount > 0 && filter != RecentsFilter.ALL) {
+                                        "${filter.label} ($badgeCount)"
+                                    } else {
+                                        filter.label
+                                    }
+                                )
+                            },
+                            modifier = Modifier.testTag("recents_filter_${filter.name.lowercase()}")
                         )
                     }
                 }
             }
 
-            // App Internal Storage Call Recordings Strip
-            if (recordings.isNotEmpty() && (selectedFilter == RecentsFilter.ALL || selectedFilter == RecentsFilter.RECORDED)) {
-                item {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = "Internal Storage Recordings (${recordings.size})",
-                            style = MaterialTheme.typography.titleSmall,
-                            color = MaterialTheme.colorScheme.primary
-                        )
-                        OutlinedButton(
-                            onClick = onOpenRecordingSettings,
-                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                            modifier = Modifier.testTag("recents_auto_record_settings_button")
-                        ) {
-                            Icon(
-                                imageVector = Icons.Filled.FiberManualRecord,
-                                contentDescription = null,
-                                tint = CallEndRed,
-                                modifier = Modifier.size(12.dp)
+            // Strictly isolated section per selected menu
+            when (selectedFilter) {
+                RecentsFilter.ALL -> {
+                    if (allRecentGroups.isEmpty()) {
+                        item {
+                            RecentsEmptyStateCard(
+                                icon = Icons.Filled.History,
+                                title = "No Recent Calls Yet",
+                                subtitle = "Place a SIM call from the Keypad or receive a call to see it listed here."
                             )
-                            Spacer(Modifier.width(5.dp))
-                            Text("Auto-Rec Rules", style = MaterialTheme.typography.labelSmall)
+                        }
+                    } else {
+                        items(allRecentGroups, key = { "all_${it.numberKey}" }) { group ->
+                            val log = group.latestLog
+                            val logDigits = log.phoneNumber.filter { it.isDigit() }
+                            val matchedContact = log.contactInfo.contactId?.let { contactsById[it] }
+                                ?: contactsByDigits[logDigits]
+                            SwipeableCallLogItem(
+                                group = group,
+                                matchedContact = matchedContact,
+                                showSpamStyle = false,
+                                isExpanded = expandedNumberKey == group.numberKey,
+                                isSwipedOpen = openSwipeNumberKey == group.numberKey,
+                                onToggleExpand = {
+                                    openSwipeNumberKey = null
+                                    expandedNumberKey = if (expandedNumberKey == group.numberKey) null else group.numberKey
+                                },
+                                onSwipeOpenChange = { shouldOpen ->
+                                    openSwipeNumberKey = if (shouldOpen) {
+                                        group.numberKey
+                                    } else if (openSwipeNumberKey == group.numberKey) {
+                                        null
+                                    } else {
+                                        openSwipeNumberKey
+                                    }
+                                },
+                                onSwipeStart = {
+                                    if (openSwipeNumberKey != null && openSwipeNumberKey != group.numberKey) {
+                                        openSwipeNumberKey = null
+                                    }
+                                },
+                                onOpenHistory = { historyTargetLog = log },
+                                onOpenNote = { noteTargetLog = log },
+                                onCallBack = { onCallBack(log.phoneNumber) },
+                                onAddNewContact = { onOpenAddContact(log.phoneNumber, log.resolvedContactName) },
+                                onReportSpam = { onReportSpam(log.phoneNumber) },
+                                onDelete = {
+                                    if (openSwipeNumberKey == group.numberKey) openSwipeNumberKey = null
+                                    if (expandedNumberKey == group.numberKey) expandedNumberKey = null
+                                    group.logs.forEach { onDeleteLog(it.id) }
+                                }
+                            )
                         }
                     }
                 }
-                items(recordings, key = { "rec_${it.id}" }) { rec ->
-                    val isPlaying = playingRecordingId == rec.id
-                    Card(
-                        shape = RoundedCornerShape(16.dp),
-                        colors = CardDefaults.cardColors(
-                            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh
-                        ),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
+
+                RecentsFilter.MISSED -> {
+                    if (missedRecentGroups.isEmpty()) {
+                        item {
+                            RecentsEmptyStateCard(
+                                icon = Icons.AutoMirrored.Filled.CallMissed,
+                                title = "No Missed Calls",
+                                subtitle = "You have no missed calls in your recent call history."
+                            )
+                        }
+                    } else {
+                        items(missedRecentGroups, key = { "missed_${it.numberKey}" }) { group ->
+                            val log = group.latestLog
+                            val logDigits = log.phoneNumber.filter { it.isDigit() }
+                            val matchedContact = log.contactInfo.contactId?.let { contactsById[it] }
+                                ?: contactsByDigits[logDigits]
+                            SwipeableCallLogItem(
+                                group = group,
+                                matchedContact = matchedContact,
+                                showSpamStyle = false,
+                                isExpanded = expandedNumberKey == group.numberKey,
+                                isSwipedOpen = openSwipeNumberKey == group.numberKey,
+                                onToggleExpand = {
+                                    openSwipeNumberKey = null
+                                    expandedNumberKey = if (expandedNumberKey == group.numberKey) null else group.numberKey
+                                },
+                                onSwipeOpenChange = { shouldOpen ->
+                                    openSwipeNumberKey = if (shouldOpen) {
+                                        group.numberKey
+                                    } else if (openSwipeNumberKey == group.numberKey) {
+                                        null
+                                    } else {
+                                        openSwipeNumberKey
+                                    }
+                                },
+                                onSwipeStart = {
+                                    if (openSwipeNumberKey != null && openSwipeNumberKey != group.numberKey) {
+                                        openSwipeNumberKey = null
+                                    }
+                                },
+                                onOpenHistory = { historyTargetLog = log },
+                                onOpenNote = { noteTargetLog = log },
+                                onCallBack = { onCallBack(log.phoneNumber) },
+                                onAddNewContact = { onOpenAddContact(log.phoneNumber, log.resolvedContactName) },
+                                onReportSpam = { onReportSpam(log.phoneNumber) },
+                                onDelete = {
+                                    if (openSwipeNumberKey == group.numberKey) openSwipeNumberKey = null
+                                    if (expandedNumberKey == group.numberKey) expandedNumberKey = null
+                                    group.logs.forEach { onDeleteLog(it.id) }
+                                }
+                            )
+                        }
+                    }
+                }
+
+                RecentsFilter.NOTES -> {
+                    if (notedLogs.isEmpty()) {
+                        item {
+                            RecentsEmptyStateCard(
+                                icon = Icons.Filled.EditNote,
+                                title = "No Call Notes Yet",
+                                subtitle = "Tap any call in Recent Calls and choose Note to save a quick text note for that call."
+                            )
+                        }
+                    } else {
+                        item {
+                            Text(
+                                text = "Call Notes (${notedLogs.size})",
+                                style = MaterialTheme.typography.titleSmall,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        }
+                        items(notedLogs, key = { "note_${it.id}" }) { log ->
+                            val logDigits = log.phoneNumber.filter { it.isDigit() }
+                            val matchedContact = log.contactInfo.contactId?.let { contactsById[it] }
+                                ?: contactsByDigits[logDigits]
+                            CallNoteMenuCard(
+                                log = log,
+                                matchedContact = matchedContact,
+                                onEditNote = { noteTargetLog = log },
+                                onCallBack = { onCallBack(log.phoneNumber) }
+                            )
+                        }
+                    }
+                }
+
+                RecentsFilter.RECORDED -> {
+                    item {
                         Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 12.dp, vertical = 10.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            IconButton(
-                                onClick = { onTogglePlayback(rec) },
-                                modifier = Modifier.testTag("play_recording_${rec.id}")
+                            Text(
+                                text = "Recorded Calls (${recordings.size})",
+                                style = MaterialTheme.typography.titleSmall,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                            OutlinedButton(
+                                onClick = onOpenRecordingSettings,
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                modifier = Modifier.testTag("recents_auto_record_settings_button")
                             ) {
                                 Icon(
-                                    imageVector = if (isPlaying) Icons.Filled.Stop else Icons.Filled.PlayArrow,
-                                    contentDescription = if (isPlaying) "Stop playback" else "Play recording",
-                                    tint = MaterialTheme.colorScheme.primary
+                                    imageVector = Icons.Filled.FiberManualRecord,
+                                    contentDescription = null,
+                                    tint = CallEndRed,
+                                    modifier = Modifier.size(12.dp)
                                 )
+                                Spacer(Modifier.width(5.dp))
+                                Text("Auto-Rec Rules", style = MaterialTheme.typography.labelSmall)
                             }
-                            Column(modifier = Modifier.weight(1f)) {
+                        }
+                    }
+                    if (recordings.isEmpty()) {
+                        item {
+                            RecentsEmptyStateCard(
+                                icon = Icons.Filled.GraphicEq,
+                                title = "No Call Recordings Yet",
+                                subtitle = "Record a call from the active call screen or enable Automatic Call Recording in Recording Settings.",
+                                actionLabel = "Recording Settings",
+                                onAction = onOpenRecordingSettings
+                            )
+                        }
+                    } else {
+                        items(recordings, key = { "rec_${it.id}" }) { rec ->
+                            RecordedCallCard(
+                                recording = rec,
+                                isPlaying = playingRecordingId == rec.id,
+                                onTogglePlayback = { onTogglePlayback(rec) },
+                                onCallBack = { onCallBack(rec.phoneNumber) },
+                                onDelete = { onDeleteRecording(rec) }
+                            )
+                        }
+                    }
+                }
+
+                RecentsFilter.BLOCKED -> {
+                    if (blockedRules.isEmpty() && spamCallGroups.isEmpty()) {
+                        item {
+                            RecentsEmptyStateCard(
+                                icon = Icons.Filled.Shield,
+                                title = "No Spam or Blocked Numbers",
+                                subtitle = "Blocked numbers and spam-flagged calls will appear here instead of your Recent Calls list.",
+                                actionLabel = "Manage Blocked Numbers",
+                                onAction = onOpenBlockedNumbers
+                            )
+                        }
+                    } else {
+                        if (blockedRules.isNotEmpty()) {
+                            item {
                                 Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
                                 ) {
                                     Text(
-                                        text = rec.displayName.ifBlank { rec.phoneNumber },
+                                        text = "Blocked Numbers (${blockedRules.size})",
                                         style = MaterialTheme.typography.titleSmall,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
+                                        color = CallEndRed
                                     )
-                                    if (rec.autoRecorded) {
-                                        Surface(
-                                            shape = RoundedCornerShape(6.dp),
-                                            color = CallEndRed.copy(alpha = 0.18f)
-                                        ) {
-                                            Text(
-                                                text = "AUTO",
-                                                style = MaterialTheme.typography.labelSmall,
-                                                color = CallEndRed,
-                                                modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp)
-                                            )
-                                        }
+                                    TextButton(
+                                        onClick = onOpenBlockedNumbers,
+                                        modifier = Modifier.testTag("spam_menu_manage_blocked_button")
+                                    ) {
+                                        Text("Manage")
                                     }
-                                    Icon(
-                                        imageVector = if (rec.encryptedAtRest) Icons.Filled.Lock else Icons.Filled.Folder,
-                                        contentDescription = if (rec.encryptedAtRest) "Encrypted recording" else "Saved in App Internal Storage",
-                                        tint = MaterialTheme.colorScheme.primary,
-                                        modifier = Modifier.size(13.dp)
-                                    )
                                 }
-                                if (rec.storagePath.isNotBlank()) {
-                                    Text(
-                                        text = rec.storagePath,
-                                        style = MonoMetricStyle,
-                                        color = MaterialTheme.colorScheme.primary,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                }
-                                Text(
-                                    text = "${formatDuration(rec.durationSec)} • ${rec.fileSizeBytes / 1024} KB • Internal Storage • ${formatTimestamp(rec.createdAt)}",
-                                    style = MonoMetricStyle,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
                             }
-                            IconButton(onClick = { onDeleteRecording(rec) }) {
-                                Icon(
-                                    imageVector = Icons.Filled.DeleteOutline,
-                                    contentDescription = "Delete recording",
-                                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            items(blockedRules, key = { "blocked_rule_${it.id}" }) { rule ->
+                                BlockedNumberSpamMenuCard(
+                                    rule = rule,
+                                    onUnblock = { onUnblockNumber(rule) }
                                 )
                             }
                         }
-                    }
-                }
-            }
 
-            // Call History Empty State or List
-            if (filteredLogs.isEmpty()) {
-                item {
-                    Surface(
-                        shape = RoundedCornerShape(22.dp),
-                        color = MaterialTheme.colorScheme.surfaceContainerLow,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 20.dp)
-                    ) {
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(28.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            verticalArrangement = Arrangement.spacedBy(10.dp)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Filled.History,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.size(44.dp)
-                            )
-                            Text(
-                                text = "No Call History Yet",
-                                style = MaterialTheme.typography.titleMedium
-                            )
-                            Text(
-                                text = "Place a SIM call from the Keypad, import your device call log, or restore an AES-256 encrypted sync bundle.",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
+                        if (spamCallGroups.isNotEmpty()) {
+                            item {
+                                Text(
+                                    text = "Spam & Blocked Calls (${spamCallGroups.size})",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    color = SpamWarningCoral,
+                                    modifier = Modifier.padding(top = if (blockedRules.isNotEmpty()) 6.dp else 0.dp)
+                                )
+                            }
+                            items(spamCallGroups, key = { "spam_${it.numberKey}" }) { group ->
+                                val log = group.latestLog
+                                val logDigits = log.phoneNumber.filter { it.isDigit() }
+                                val matchedContact = log.contactInfo.contactId?.let { contactsById[it] }
+                                    ?: contactsByDigits[logDigits]
+                                SwipeableCallLogItem(
+                                    group = group,
+                                    matchedContact = matchedContact,
+                                    showSpamStyle = true,
+                                    isExpanded = expandedNumberKey == group.numberKey,
+                                    isSwipedOpen = openSwipeNumberKey == group.numberKey,
+                                    onToggleExpand = {
+                                        openSwipeNumberKey = null
+                                        expandedNumberKey = if (expandedNumberKey == group.numberKey) null else group.numberKey
+                                    },
+                                    onSwipeOpenChange = { shouldOpen ->
+                                        openSwipeNumberKey = if (shouldOpen) {
+                                            group.numberKey
+                                        } else if (openSwipeNumberKey == group.numberKey) {
+                                            null
+                                        } else {
+                                            openSwipeNumberKey
+                                        }
+                                    },
+                                    onSwipeStart = {
+                                        if (openSwipeNumberKey != null && openSwipeNumberKey != group.numberKey) {
+                                            openSwipeNumberKey = null
+                                        }
+                                    },
+                                    onOpenHistory = { historyTargetLog = log },
+                                    onOpenNote = { noteTargetLog = log },
+                                    onCallBack = { onCallBack(log.phoneNumber) },
+                                    onAddNewContact = { onOpenAddContact(log.phoneNumber, log.resolvedContactName) },
+                                    onReportSpam = { onReportSpam(log.phoneNumber) },
+                                    onDelete = {
+                                        if (openSwipeNumberKey == group.numberKey) openSwipeNumberKey = null
+                                        if (expandedNumberKey == group.numberKey) expandedNumberKey = null
+                                        group.logs.forEach { onDeleteLog(it.id) }
+                                    }
+                                )
+                            }
                         }
                     }
-                }
-            } else {
-                items(filteredLogs, key = { it.id }) { log ->
-                    val linkedRec = log.recordingId?.let { recordingsById[it] }
-                    val logDigits = log.phoneNumber.filter { it.isDigit() }
-                    val matchedContact = log.contactInfo.contactId?.let { contactsById[it] }
-                        ?: contactsByDigits[logDigits]
-                    val totalForNumber = callsCountByNumberKey[normalizeCallHistoryKey(log.phoneNumber)] ?: 1
-                    SwipeableCallLogItem(
-                        log = log,
-                        matchedContact = matchedContact,
-                        totalCallsForNumber = totalForNumber,
-                        hasRecording = linkedRec != null,
-                        isPlayingRecording = linkedRec != null && playingRecordingId == linkedRec.id,
-                        isExpanded = expandedLogId == log.id,
-                        isSwipedOpen = openSwipeLogId == log.id,
-                        onToggleExpand = {
-                            openSwipeLogId = null
-                            expandedLogId = if (expandedLogId == log.id) null else log.id
-                        },
-                        onSwipeOpenChange = { shouldOpen ->
-                            openSwipeLogId = if (shouldOpen) log.id else if (openSwipeLogId == log.id) null else openSwipeLogId
-                        },
-                        onSwipeStart = {
-                            if (openSwipeLogId != null && openSwipeLogId != log.id) {
-                                openSwipeLogId = null
-                            }
-                        },
-                        onOpenHistory = { historyTargetLog = log },
-                        onOpenNote = { noteTargetLog = log },
-                        onCallBack = { onCallBack(log.phoneNumber) },
-                        onAddNewContact = { onOpenAddContact(log.phoneNumber, log.resolvedContactName) },
-                        onPlayRecording = { linkedRec?.let(onTogglePlayback) },
-                        onReportSpam = { onReportSpam(log.phoneNumber) },
-                        onDelete = {
-                            if (openSwipeLogId == log.id) openSwipeLogId = null
-                            if (expandedLogId == log.id) expandedLogId = null
-                            onDeleteLog(log.id)
-                        }
-                    )
                 }
             }
         }
@@ -685,11 +762,9 @@ fun RecentsScreen(
 
 @Composable
 private fun SwipeableCallLogItem(
-    log: CallLogEntity,
+    group: GroupedRecentCall,
     matchedContact: ContactEntity?,
-    totalCallsForNumber: Int,
-    hasRecording: Boolean,
-    isPlayingRecording: Boolean,
+    showSpamStyle: Boolean,
     isExpanded: Boolean,
     isSwipedOpen: Boolean,
     onToggleExpand: () -> Unit,
@@ -699,15 +774,15 @@ private fun SwipeableCallLogItem(
     onOpenNote: () -> Unit,
     onCallBack: () -> Unit,
     onAddNewContact: () -> Unit,
-    onPlayRecording: () -> Unit,
     onReportSpam: () -> Unit,
     onDelete: () -> Unit
 ) {
+    val log = group.latestLog
     val density = LocalDensity.current
     val revealWidthDp = 96.dp
     val revealWidthPx = with(density) { revealWidthDp.toPx() }
     val coroutineScope = rememberCoroutineScope()
-    val offsetX = remember(log.id) { Animatable(if (isSwipedOpen) -revealWidthPx else 0f) }
+    val offsetX = remember(group.numberKey) { Animatable(if (isSwipedOpen) -revealWidthPx else 0f) }
 
     LaunchedEffect(isSwipedOpen, revealWidthPx) {
         val target = if (isSwipedOpen) -revealWidthPx else 0f
@@ -766,7 +841,7 @@ private fun SwipeableCallLogItem(
             modifier = Modifier
                 .fillMaxWidth()
                 .offset { IntOffset(offsetX.value.roundToInt(), 0) }
-                .pointerInput(log.id, revealWidthPx) {
+                .pointerInput(group.numberKey, revealWidthPx) {
                     detectHorizontalDragGestures(
                         onDragStart = {
                             onSwipeStart()
@@ -807,11 +882,9 @@ private fun SwipeableCallLogItem(
                 }
         ) {
             CallLogCard(
-                log = log,
+                group = group,
                 matchedContact = matchedContact,
-                totalCallsForNumber = totalCallsForNumber,
-                hasRecording = hasRecording,
-                isPlayingRecording = isPlayingRecording,
+                showSpamStyle = showSpamStyle,
                 isExpanded = isExpanded,
                 onCardClick = {
                     if (isSwipedOpen) {
@@ -824,7 +897,6 @@ private fun SwipeableCallLogItem(
                 onOpenNote = onOpenNote,
                 onCallBack = onCallBack,
                 onAddNewContact = onAddNewContact,
-                onPlayRecording = onPlayRecording,
                 onReportSpam = onReportSpam,
                 onDelete = onDelete
             )
@@ -835,23 +907,22 @@ private fun SwipeableCallLogItem(
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun CallLogCard(
-    log: CallLogEntity,
+    group: GroupedRecentCall,
     matchedContact: ContactEntity?,
-    totalCallsForNumber: Int,
-    hasRecording: Boolean,
-    isPlayingRecording: Boolean,
+    showSpamStyle: Boolean,
     isExpanded: Boolean,
     onCardClick: () -> Unit,
     onOpenHistory: () -> Unit,
     onOpenNote: () -> Unit,
     onCallBack: () -> Unit,
     onAddNewContact: () -> Unit,
-    onPlayRecording: () -> Unit,
     onReportSpam: () -> Unit,
     onDelete: () -> Unit
 ) {
+    val log = group.latestLog
     val context = LocalContext.current
-    val isMissed = log.direction == CallDirection.MISSED
+    val isLatestMissed = log.direction == CallDirection.MISSED
+    val showMissedCount = isLatestMissed && group.missedCalls > 0
     val dirIcon = when (log.direction) {
         CallDirection.OUTGOING -> Icons.AutoMirrored.Filled.CallMade
         CallDirection.MISSED -> Icons.AutoMirrored.Filled.CallMissed
@@ -879,7 +950,10 @@ private fun CallLogCard(
                 MaterialTheme.colorScheme.surfaceContainer
             }
         ),
-        border = if (isMissed) BorderStroke(1.dp, CallEndRed.copy(alpha = 0.30f)) else null,
+        border = when {
+            isLatestMissed || showSpamStyle -> BorderStroke(1.dp, CallEndRed.copy(alpha = 0.30f))
+            else -> null
+        },
         modifier = Modifier
             .fillMaxWidth()
             .clickable(onClick = onCardClick)
@@ -890,7 +964,7 @@ private fun CallLogCard(
                 .fillMaxWidth()
                 .padding(horizontal = 14.dp, vertical = 12.dp)
         ) {
-            // Clean default Recents row (Avatar, Name/Number, Timestamp/Duration, Country, Call Back)
+            // Clean unique-number Recents row (Avatar, Name/Number + Missed/Total counts, Timestamp, Country, Call Back)
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
@@ -940,22 +1014,37 @@ private fun CallLogCard(
 
                 Column(
                     modifier = Modifier.weight(1f),
-                    verticalArrangement = Arrangement.spacedBy(2.dp)
+                    verticalArrangement = Arrangement.spacedBy(3.dp)
                 ) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
+                        val baseTitle = resolvedName.ifBlank { log.phoneNumber }
                         Text(
-                            text = resolvedName.ifBlank { log.phoneNumber },
+                            text = baseTitle,
                             style = MaterialTheme.typography.titleMedium,
-                            fontWeight = if (isMissed) FontWeight.SemiBold else FontWeight.Medium,
-                            color = if (isMissed) CallEndRed else MaterialTheme.colorScheme.onSurface,
+                            fontWeight = if (isLatestMissed) FontWeight.SemiBold else FontWeight.Medium,
+                            color = if (isLatestMissed || showSpamStyle) CallEndRed else MaterialTheme.colorScheme.onSurface,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.weight(1f, fill = false)
                         )
-                        if (contactLabel.isNotBlank()) {
+                        if (showMissedCount) {
+                            Surface(
+                                shape = RoundedCornerShape(999.dp),
+                                color = CallEndRed.copy(alpha = 0.16f),
+                                modifier = Modifier.testTag("missed_count_badge_${log.id}")
+                            ) {
+                                Text(
+                                    text = "${group.missedCalls} missed",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = CallEndRed,
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                )
+                            }
+                        } else if (contactLabel.isNotBlank()) {
                             Surface(
                                 shape = RoundedCornerShape(6.dp),
                                 color = MaterialTheme.colorScheme.surfaceContainerHighest
@@ -969,18 +1058,33 @@ private fun CallLogCard(
                             }
                         }
                     }
-                    Text(
-                        text = buildString {
-                            if (isMissed) append("Missed • ")
-                            if (resolvedName.isNotBlank()) append("${log.phoneNumber} • ")
-                            append(formatTimestamp(log.timestamp))
-                            if (log.durationSec > 0L) append(" • ${formatDuration(log.durationSec)}")
-                        },
-                        style = MaterialTheme.typography.bodySmall,
-                        color = if (isMissed) CallEndRed.copy(alpha = 0.85f) else MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        SimSlotBadge(
+                            routeLabel = log.routeLabel,
+                            compact = true,
+                            modifier = Modifier.testTag("recent_call_sim_${log.id}")
+                        )
+                        Text(
+                            text = buildString {
+                                if (showMissedCount) {
+                                    append("Missed (${group.missedCalls}) • ")
+                                } else if (showSpamStyle && group.blockedCalls > 0) {
+                                    append("Blocked • ")
+                                }
+                                if (resolvedName.isNotBlank()) append("${log.phoneNumber} • ")
+                                append(formatTimestamp(log.timestamp))
+                                if (log.durationSec > 0L) append(" • ${formatDuration(log.durationSec)}")
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (isLatestMissed) CallEndRed.copy(alpha = 0.85f) else MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
                     if (callingCountry.isNotBlank()) {
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
@@ -989,48 +1093,17 @@ private fun CallLogCard(
                             Icon(
                                 imageVector = Icons.Filled.Public,
                                 contentDescription = "Calling country",
-                                tint = if (isMissed) CallEndRed.copy(alpha = 0.78f) else MaterialTheme.colorScheme.onSurfaceVariant,
+                                tint = if (isLatestMissed) CallEndRed.copy(alpha = 0.78f) else MaterialTheme.colorScheme.onSurfaceVariant,
                                 modifier = Modifier.size(12.dp)
                             )
                             Text(
                                 text = callingCountry,
                                 style = MaterialTheme.typography.labelSmall,
-                                color = if (isMissed) CallEndRed.copy(alpha = 0.85f) else MaterialTheme.colorScheme.onSurfaceVariant,
+                                color = if (isLatestMissed) CallEndRed.copy(alpha = 0.85f) else MaterialTheme.colorScheme.onSurfaceVariant,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
                                 modifier = Modifier.testTag("recent_call_country_${log.id}")
                             )
-                        }
-                    }
-                    if (log.quickNote.isNotBlank() && !isExpanded) {
-                        Surface(
-                            shape = RoundedCornerShape(8.dp),
-                            color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f),
-                            modifier = Modifier
-                                .padding(top = 3.dp)
-                                .clip(RoundedCornerShape(8.dp))
-                                .clickable(onClick = onOpenNote)
-                                .testTag("recent_call_note_preview_${log.id}")
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(4.dp)
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Filled.EditNote,
-                                    contentDescription = "Call note",
-                                    tint = MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier.size(13.dp)
-                                )
-                                Text(
-                                    text = log.quickNote,
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onPrimaryContainer,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                            }
                         }
                     }
                 }
@@ -1047,7 +1120,7 @@ private fun CallLogCard(
                 }
             }
 
-            // Expanded inside-number details & options (SIM, MOS, Calls count, Add, History, Spam Shield, Delete)
+            // Expanded inside-number details & options
             AnimatedVisibility(
                 visible = isExpanded,
                 enter = expandVertically(
@@ -1069,26 +1142,28 @@ private fun CallLogCard(
                         color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
                     )
 
-                    // Telemetry & Call Count Badges inside clicked number
                     FlowRow(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
                         verticalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
+                        SimSlotBadge(routeLabel = log.routeLabel, compact = false)
                         NetworkBadge(networkType = log.networkType)
                         if (log.mosScore > 0f) {
                             MosBadge(mosScore = log.mosScore)
                         }
-                        Surface(
-                            shape = RoundedCornerShape(8.dp),
-                            color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.65f)
-                        ) {
-                            Text(
-                                text = "$totalCallsForNumber ${if (totalCallsForNumber == 1) "call" else "calls"}",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onPrimaryContainer,
-                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
-                            )
+                        if (showMissedCount) {
+                            Surface(
+                                shape = RoundedCornerShape(8.dp),
+                                color = CallEndRed.copy(alpha = 0.16f)
+                            ) {
+                                Text(
+                                    text = "${group.missedCalls} missed",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = CallEndRed,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                                )
+                            }
                         }
                         if (log.encryptedTransport) {
                             Surface(
@@ -1114,13 +1189,13 @@ private fun CallLogCard(
                                 }
                             }
                         }
-                        if (log.spamScore >= 50 || log.direction == CallDirection.BLOCKED) {
+                        if (showSpamStyle) {
                             Surface(
                                 shape = RoundedCornerShape(8.dp),
                                 color = SpamWarningCoral.copy(alpha = 0.18f)
                             ) {
                                 Text(
-                                    text = "SPAM ${log.spamScore}",
+                                    text = if (log.spamScore > 0) "SPAM ${log.spamScore}" else "BLOCKED",
                                     style = MaterialTheme.typography.labelSmall,
                                     color = SpamWarningCoral,
                                     modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
@@ -1129,61 +1204,23 @@ private fun CallLogCard(
                         }
                     }
 
-                    // Full Call Note Card inside expanded view (tap to edit)
-                    if (log.quickNote.isNotBlank()) {
-                        Surface(
-                            shape = RoundedCornerShape(12.dp),
-                            color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(12.dp))
-                                .clickable(onClick = onOpenNote)
-                                .testTag("expanded_call_note_card_${log.id}")
-                        ) {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(horizontal = 10.dp, vertical = 8.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Filled.EditNote,
-                                    contentDescription = "Call note",
-                                    tint = MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier.size(18.dp)
-                                )
-                                Text(
-                                    text = log.quickNote,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurface,
-                                    modifier = Modifier.weight(1f)
-                                )
-                                Icon(
-                                    imageVector = Icons.Filled.Edit,
-                                    contentDescription = "Edit call note",
-                                    tint = MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier.size(15.dp)
-                                )
-                            }
-                        }
-                    }
-
-                    // Action Buttons Row (Note, Add, History, Play Recording if present, Spam Shield, Delete)
+                    // Action Buttons Row (Note, Add, History, Spam, Delete)
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        ExpandedNumberActionTile(
-                            icon = if (log.quickNote.isNotBlank()) Icons.Filled.EditNote else Icons.AutoMirrored.Filled.NoteAdd,
-                            label = if (log.quickNote.isNotBlank()) "Edit Note" else "Note",
-                            tint = MaterialTheme.colorScheme.primary,
-                            onClick = onOpenNote,
-                            modifier = Modifier
-                                .weight(1f)
-                                .testTag("note_recent_log_${log.id}")
-                        )
-                        if (isUnknownContact && log.phoneNumber.isNotBlank()) {
+                        if (!showSpamStyle) {
+                            ExpandedNumberActionTile(
+                                icon = if (log.quickNote.isNotBlank()) Icons.Filled.EditNote else Icons.AutoMirrored.Filled.NoteAdd,
+                                label = "Note",
+                                tint = MaterialTheme.colorScheme.primary,
+                                onClick = onOpenNote,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("note_recent_log_${log.id}")
+                            )
+                        }
+                        if (isUnknownContact && log.phoneNumber.isNotBlank() && !showSpamStyle) {
                             ExpandedNumberActionTile(
                                 icon = Icons.Filled.PersonAdd,
                                 label = "Add",
@@ -1203,26 +1240,17 @@ private fun CallLogCard(
                                 .weight(1f)
                                 .testTag("open_number_history_${log.id}")
                         )
-                        if (hasRecording) {
+                        if (!showSpamStyle) {
                             ExpandedNumberActionTile(
-                                icon = if (isPlayingRecording) Icons.Filled.Stop else Icons.Filled.GraphicEq,
-                                label = if (isPlayingRecording) "Stop" else "Audio",
-                                tint = MaterialTheme.colorScheme.primary,
-                                onClick = onPlayRecording,
+                                icon = Icons.Filled.Shield,
+                                label = "Spam",
+                                tint = SpamWarningCoral,
+                                onClick = onReportSpam,
                                 modifier = Modifier
                                     .weight(1f)
-                                    .testTag("play_recent_recording_${log.id}")
+                                    .testTag("spam_shield_recent_${log.id}")
                             )
                         }
-                        ExpandedNumberActionTile(
-                            icon = Icons.Filled.Shield,
-                            label = "Spam",
-                            tint = SpamWarningCoral,
-                            onClick = onReportSpam,
-                            modifier = Modifier
-                                .weight(1f)
-                                .testTag("spam_shield_recent_${log.id}")
-                        )
                         ExpandedNumberActionTile(
                             icon = Icons.Filled.DeleteOutline,
                             label = "Delete",

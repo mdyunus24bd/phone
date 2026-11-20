@@ -700,9 +700,9 @@ class VoxLineRepository(
             return@withContext Result.failure(SecurityException("READ_CALL_LOG permission required"))
         }
         return@withContext try {
-            val existingKeys = db.callHistoryDao().getAllSnapshot()
-                .map { "${it.phoneNumber}:${it.timestamp}" }
-                .toMutableSet()
+            val existingByKey = db.callHistoryDao().getAllSnapshot()
+                .associateBy { "${it.phoneNumber}:${it.timestamp}" }
+            val existingKeys = existingByKey.keys.toMutableSet()
 
             val contactsByDigits = db.contactDao().getAllSnapshot()
                 .mapNotNull { c ->
@@ -711,13 +711,15 @@ class VoxLineRepository(
                 }
                 .toMap()
 
+            val simLookup = com.example.telecom.TelecomBridge(context).buildSimAccountLookup()
             val imported = mutableListOf<CallLogEntity>()
             val projection = arrayOf(
                 CallLog.Calls.NUMBER,
                 CallLog.Calls.CACHED_NAME,
                 CallLog.Calls.TYPE,
                 CallLog.Calls.DATE,
-                CallLog.Calls.DURATION
+                CallLog.Calls.DURATION,
+                CallLog.Calls.PHONE_ACCOUNT_ID
             )
             context.contentResolver.query(
                 CallLog.Calls.CONTENT_URI,
@@ -731,6 +733,7 @@ class VoxLineRepository(
                 val typeIdx = cursor.getColumnIndex(CallLog.Calls.TYPE)
                 val dateIdx = cursor.getColumnIndex(CallLog.Calls.DATE)
                 val durIdx = cursor.getColumnIndex(CallLog.Calls.DURATION)
+                val accountIdx = cursor.getColumnIndex(CallLog.Calls.PHONE_ACCOUNT_ID)
                 var scanned = 0
                 while (cursor.moveToNext() && scanned < maxItems) {
                     scanned++
@@ -739,8 +742,19 @@ class VoxLineRepository(
                     val type = if (typeIdx >= 0) cursor.getInt(typeIdx) else CallLog.Calls.INCOMING_TYPE
                     val date = if (dateIdx >= 0) cursor.getLong(dateIdx) else System.currentTimeMillis()
                     val duration = if (durIdx >= 0) cursor.getLong(durIdx) else 0L
+                    val phoneAccountId = if (accountIdx >= 0) cursor.getString(accountIdx)?.trim().orEmpty() else ""
+                    val resolvedSimLabel = simLookup.resolve(accountId = phoneAccountId)
                     val key = "$number:$date"
-                    if (number.isNotEmpty() && existingKeys.add(key)) {
+                    val existing = existingByKey[key]
+                    if (existing != null) {
+                        val isGenericLabel = existing.routeLabel.isBlank() ||
+                            existing.routeLabel.equals("Device SIM", ignoreCase = true) ||
+                            existing.routeLabel.equals("SIM Cellular", ignoreCase = true) ||
+                            existing.routeLabel.equals("Phone Default SIM", ignoreCase = true)
+                        if (isGenericLabel && resolvedSimLabel.isNotBlank() && resolvedSimLabel != existing.routeLabel) {
+                            db.callHistoryDao().updateRouteLabel(existing.id, resolvedSimLabel)
+                        }
+                    } else if (number.isNotEmpty() && existingKeys.add(key)) {
                         val dir = when (type) {
                             CallLog.Calls.INCOMING_TYPE -> CallDirection.INCOMING
                             CallLog.Calls.OUTGOING_TYPE -> CallDirection.OUTGOING
@@ -757,7 +771,7 @@ class VoxLineRepository(
                                 phoneNumber = number,
                                 displayName = resolvedName,
                                 callType = CallType.SIM,
-                                routeLabel = "Device SIM",
+                                routeLabel = resolvedSimLabel,
                                 direction = dir,
                                 timestamp = date,
                                 durationSec = duration,

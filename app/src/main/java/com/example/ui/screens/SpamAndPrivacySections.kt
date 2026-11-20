@@ -22,7 +22,9 @@ import androidx.compose.material.icons.filled.CloudOff
 import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.DeleteForever
 import androidx.compose.material.icons.filled.DeleteOutline
+import androidx.compose.material.icons.filled.Dialpad
 import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.FormatSize
 import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Palette
@@ -55,10 +57,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import com.example.data.local.SpamRuleEntity
+import com.example.data.preferences.AppFontSizeOption
+import com.example.data.preferences.DialerSizeOption
 import com.example.data.preferences.KeypadLayoutStyle
 import com.example.data.preferences.VoxLineSettings
 import com.example.security.CryptoVault
@@ -289,6 +295,8 @@ fun PrivacySyncAndThemeSection(
     onSetThemeMode: (ThemeMode) -> Unit,
     onSetAccentPalette: (AccentPalette) -> Unit,
     onSetHighContrast: (Boolean) -> Unit,
+    onSetFontSizeOption: (AppFontSizeOption) -> Unit,
+    onSetDialerSizeOption: (DialerSizeOption) -> Unit,
     onSetKeypadLayout: (KeypadLayoutStyle) -> Unit,
     onSetScreenPrivacy: (Boolean) -> Unit,
     onSetDtmfTones: (Boolean) -> Unit,
@@ -300,6 +308,168 @@ fun PrivacySyncAndThemeSection(
     var confirmWipe by remember { mutableStateOf(false) }
 
     Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+        // Font Size & Dialer Size Controls Card
+        Card(
+            shape = RoundedCornerShape(18.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag("settings_font_dialer_size_card")
+        ) {
+            Column(
+                modifier = Modifier.padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.FormatSize,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Font Size", style = MaterialTheme.typography.titleMedium)
+                        Text(
+                            text = "Adjust text size across Recents, Contacts, and Settings",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Surface(
+                        shape = RoundedCornerShape(999.dp),
+                        color = MaterialTheme.colorScheme.primaryContainer
+                    ) {
+                        Text(
+                            text = settings.fontSizeOption.percentLabel,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                        )
+                    }
+                }
+
+                LazyRow(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    items(AppFontSizeOption.entries) { option ->
+                        FilterChip(
+                            selected = settings.fontSizeOption == option,
+                            onClick = { onSetFontSizeOption(option) },
+                            label = { Text(option.label) },
+                            modifier = Modifier.testTag("settings_font_size_${option.name}")
+                        )
+                    }
+                }
+
+                // Live Font Preview
+                Surface(
+                    shape = RoundedCornerShape(14.dp),
+                    color = MaterialTheme.colorScheme.surfaceContainerLow,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                        verticalArrangement = Arrangement.spacedBy(2.dp)
+                    ) {
+                        Text(
+                            text = "Preview • Incoming Call",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        Text(
+                            text = "Alex Morgan",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Text(
+                            text = "+1 555-019-2834 • SIM 1 • Just now",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.padding(top = 4.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.Dialpad,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Dialer Size", style = MaterialTheme.typography.titleMedium)
+                        Text(
+                            text = settings.dialerSizeOption.subtitle,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+
+                LazyRow(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    items(DialerSizeOption.entries) { option ->
+                        FilterChip(
+                            selected = settings.dialerSizeOption == option,
+                            onClick = { onSetDialerSizeOption(option) },
+                            label = { Text(option.label) },
+                            modifier = Modifier.testTag("settings_dialer_size_${option.name}")
+                        )
+                    }
+                }
+
+                // Live Dialer Key Size Preview
+                Surface(
+                    shape = RoundedCornerShape(14.dp),
+                    color = MaterialTheme.colorScheme.surfaceContainerLow,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    val previewKeySize = (46f * settings.dialerSizeOption.scale).dp.coerceIn(38.dp, 62.dp)
+                    val previewFontSize = (18f * settings.dialerSizeOption.scale).sp
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 10.dp),
+                        horizontalArrangement = Arrangement.SpaceEvenly,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        listOf("1" to "∞", "2" to "ABC", "3" to "DEF").forEach { (digit, letters) ->
+                            Surface(
+                                shape = CircleShape,
+                                color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                                modifier = Modifier.size(previewKeySize)
+                            ) {
+                                Column(
+                                    verticalArrangement = Arrangement.Center,
+                                    horizontalAlignment = Alignment.CenterHorizontally
+                                ) {
+                                    Text(
+                                        text = digit,
+                                        fontSize = previewFontSize,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                    Text(
+                                        text = letters,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // Customizable Dark Mode Studio
         Card(
             shape = RoundedCornerShape(18.dp),
