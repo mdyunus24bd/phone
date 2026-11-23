@@ -93,7 +93,6 @@ enum class ControlTab(val label: String, val icon: ImageVector) {
     RINGTONES("Ringtones", Icons.Filled.NotificationsActive),
     ANALYTICS("Quality", Icons.Filled.GraphicEq),
     FORWARDING("Forwarding", Icons.Filled.PhoneForwarded),
-    SPAM("Spam Shield", Icons.Filled.Shield),
     PRIVACY_THEME("Privacy & Theme", Icons.Filled.Palette)
 }
 
@@ -139,12 +138,7 @@ fun ControlCenterScreen(
     onAddQuickReplyTemplate: (String) -> Unit,
     onRemoveQuickReplyTemplate: (String) -> Unit,
     onResetQuickReplyTemplates: () -> Unit,
-    onToggleSpamShield: (Boolean) -> Unit,
-    onToggleAutoBlock: (Boolean) -> Unit,
     onOpenBlockedNumbers: () -> Unit,
-    onAddSpamRule: (String, String, Int, Boolean) -> Unit,
-    onDeleteSpamRule: (SpamRuleEntity) -> Unit,
-    onCheckSpamNumber: (String) -> SpamAssessment,
     onSetThemeMode: (ThemeMode) -> Unit,
     onSetAccentPalette: (AccentPalette) -> Unit,
     onSetHighContrast: (Boolean) -> Unit,
@@ -232,7 +226,7 @@ fun ControlCenterScreen(
                                     color = Color.White
                                 )
                                 Text(
-                                    text = "SIM Quality Telemetry • Call Forwarding • Spam Shield",
+                                    text = "SIM Quality Telemetry • Call Forwarding • Privacy",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = Color(0xFFCBD5E1)
                                 )
@@ -426,16 +420,6 @@ fun ControlCenterScreen(
                             onAddQuickReplyTemplate = onAddQuickReplyTemplate,
                             onRemoveQuickReplyTemplate = onRemoveQuickReplyTemplate,
                             onResetQuickReplyTemplates = onResetQuickReplyTemplates
-                        )
-                        ControlTab.SPAM -> SpamShieldSection(
-                            settings = settings,
-                            spamRules = spamRules,
-                            onToggleSpamShield = onToggleSpamShield,
-                            onToggleAutoBlock = onToggleAutoBlock,
-                            onOpenBlockedNumbers = onOpenBlockedNumbers,
-                            onAddSpamRule = onAddSpamRule,
-                            onDeleteSpamRule = onDeleteSpamRule,
-                            onCheckSpamNumber = onCheckSpamNumber
                         )
                         ControlTab.PRIVACY_THEME -> PrivacySyncAndThemeSection(
                             settings = settings,

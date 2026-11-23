@@ -8,10 +8,12 @@ import android.content.pm.PackageManager
 import android.database.ContentObserver
 import android.media.AudioManager
 import android.net.Uri
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.provider.CallLog
 import android.provider.ContactsContract
+import android.telephony.SubscriptionManager
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -218,25 +220,6 @@ class VoxLineViewModel(application: Application) : AndroidViewModel(application)
     private val _snackbarMessage = MutableStateFlow<String?>(null)
     val snackbarMessage: StateFlow<String?> = _snackbarMessage.asStateFlow()
 
-    // Live spam assessment for whatever is currently typed in the dialer
-    val dialerSpamAssessment: StateFlow<SpamAssessment?> = combine(
-        _dialInput,
-        contacts,
-        spamRules,
-        settings
-    ) { input, contactList, rules, currentSettings ->
-        val trimmed = input.trim()
-        if (trimmed.length < 3 || !currentSettings.spamShieldEnabled) {
-            null
-        } else {
-            val digits = trimmed.filter { it.isDigit() }
-            val known = contactList.any { c ->
-                digits.isNotEmpty() && c.phoneNumber.filter { it.isDigit() } == digits
-            }
-            SpamAnalyzer.evaluate(trimmed, known, rules)
-        }
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), null)
-
     private var callTimerJob: Job? = null
     private var telemetrySamplerJob: Job? = null
     private var contactsObserverDebounceJob: Job? = null
@@ -245,6 +228,13 @@ class VoxLineViewModel(application: Application) : AndroidViewModel(application)
     private val callLogSyncMutex = Mutex()
     private var contactsObserverRegistered = false
     private var callLogObserverRegistered = false
+    private var subscriptionsListenerRegistered = false
+
+    private val subscriptionsChangedListener = object : SubscriptionManager.OnSubscriptionsChangedListener() {
+        override fun onSubscriptionsChanged() {
+            _activeSims.value = telecomBridge.detectActiveSims()
+        }
+    }
 
     private val contactsContentObserver = object : ContentObserver(Handler(Looper.getMainLooper())) {
         override fun onChange(selfChange: Boolean) {
@@ -272,6 +262,7 @@ class VoxLineViewModel(application: Application) : AndroidViewModel(application)
         viewModelScope.launch {
             repository.ensureDefaultForwardingTemplates()
         }
+        ensureSubscriptionsListenerRegistered()
         autoSyncDeviceData(silent = true)
         viewModelScope.launch {
             callRecordingManager.liveAudioLevel.collect { level ->
@@ -349,15 +340,6 @@ class VoxLineViewModel(application: Application) : AndroidViewModel(application)
                     )
 
                     if (existing == null || !existing.isSystemTelecomCall) {
-                        val assessment = if (sysCall.isConference) {
-                            null
-                        } else {
-                            SpamAnalyzer.evaluate(
-                                sysCall.handle,
-                                matched != null,
-                                spamRules.value
-                            )
-                        }
                         _activeCall.value = ActiveCallSession(
                             address = sysCall.handle,
                             displayName = resolvedDisplayName,
@@ -369,7 +351,7 @@ class VoxLineViewModel(application: Application) : AndroidViewModel(application)
                             statusLabel = liveStatus,
                             isOnHold = sysCall.isHolding,
                             encryptedTransport = false,
-                            spamAssessment = assessment,
+                            spamAssessment = null,
                             cannedQuickReplies = sysCall.cannedTextResponses,
                             photoUri = matched?.photoUri.orEmpty(),
                             isConference = sysCall.isConference,
@@ -504,10 +486,31 @@ class VoxLineViewModel(application: Application) : AndroidViewModel(application)
         autoSyncDeviceData(silent = false)
     }
 
+    private fun ensureSubscriptionsListenerRegistered() {
+        if (subscriptionsListenerRegistered) return
+        if (!telecomBridge.hasPhoneStatePermission() && !telecomBridge.isDefaultDialer()) return
+        val app = getApplication<Application>()
+        val subManager = app.getSystemService(Context.TELEPHONY_SUBSCRIPTION_SERVICE) as? SubscriptionManager
+            ?: return
+        runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                subManager.addOnSubscriptionsChangedListener(
+                    ContextCompat.getMainExecutor(app),
+                    subscriptionsChangedListener
+                )
+            } else {
+                @Suppress("DEPRECATION")
+                subManager.addOnSubscriptionsChangedListener(subscriptionsChangedListener)
+            }
+            subscriptionsListenerRegistered = true
+        }
+    }
+
     fun refreshDeviceTelephonyState() {
         _isDefaultDialer.value = telecomBridge.isDefaultDialer()
         _hasPhoneStatePermission.value = telecomBridge.hasPhoneStatePermission()
         _hasWriteContactsPermission.value = checkPermission(Manifest.permission.WRITE_CONTACTS)
+        ensureSubscriptionsListenerRegistered()
         _activeSims.value = telecomBridge.detectActiveSims()
         autoSyncDeviceData(silent = true)
     }
@@ -575,7 +578,10 @@ class VoxLineViewModel(application: Application) : AndroidViewModel(application)
      * Initiates a real carrier SIM call via Android Telecom.
      * No simulated/demo call sessions are created when a carrier SIM is unavailable.
      */
-    fun startCall(address: String = _dialInput.value) {
+    fun startCall(
+        address: String = _dialInput.value,
+        preferredSim: SimSlotInfo? = null
+    ) {
         val cleanAddress = address.trim()
         if (cleanAddress.isEmpty()) {
             showMessage("Enter a phone number first.")
@@ -583,50 +589,6 @@ class VoxLineViewModel(application: Application) : AndroidViewModel(application)
         }
 
         viewModelScope.launch {
-            val cleanDigits = cleanAddress.filter { it.isDigit() }
-            val matchedContact = contacts.value.firstOrNull { c ->
-                val d = c.phoneNumber.filter { it.isDigit() }
-                d.isNotEmpty() && d == cleanDigits
-            }
-            val assessment = SpamAnalyzer.evaluate(
-                cleanAddress,
-                matchedContact != null,
-                spamRules.value
-            )
-
-            // Check if blocked by user's spam shield
-            if (settings.value.spamShieldEnabled &&
-                settings.value.autoBlockHighRiskSpam &&
-                assessment.level == SpamRiskLevel.BLOCKED
-            ) {
-                assessment.matchedRuleId?.let { repository.incrementSpamRuleMatch(it) }
-                val selectedSim = if (_selectedSimIndex.value == TelecomBridge.DEFAULT_SIM_SLOT_INDEX) {
-                    _activeSims.value.firstOrNull { it.isSystemDefault } ?: _activeSims.value.firstOrNull()
-                } else {
-                    _activeSims.value.getOrNull(_selectedSimIndex.value)
-                }
-                repository.insertCallLog(
-                    CallLogEntity(
-                        phoneNumber = cleanAddress,
-                        displayName = matchedContact?.displayName.orEmpty(),
-                        callType = CallType.SIM,
-                        routeLabel = selectedSim?.carrierName.orEmpty(),
-                        direction = CallDirection.BLOCKED,
-                        contactInfo = CallContactInfo(
-                            contactId = matchedContact?.id,
-                            name = matchedContact?.displayName.orEmpty(),
-                            phoneNumber = matchedContact?.phoneNumber.orEmpty().ifBlank { cleanAddress },
-                            label = matchedContact?.label.orEmpty()
-                        ),
-                        spamScore = assessment.score,
-                        spamReason = assessment.reason,
-                        deviceTag = settings.value.deviceSyncName
-                    )
-                )
-                showMessage("Blocked by Spam Shield: ${assessment.reason}")
-                return@launch
-            }
-
             // Evaluate DataStore Call Forwarding preference or Room Always-Forward rule
             val dsForward = settings.value.callForwarding
             val dsForwardMatch = dsForward.enabled &&
@@ -646,7 +608,8 @@ class VoxLineViewModel(application: Application) : AndroidViewModel(application)
             // Real Carrier SIM Call Dispatch via Android Telecom / ACTION_DIAL
             val dispatched = telecomBridge.placeCarrierSimCall(
                 number = finalDestination,
-                preferredSlotIndex = _selectedSimIndex.value
+                preferredSlotIndex = preferredSim?.slotIndex ?: _selectedSimIndex.value,
+                preferredSim = preferredSim
             )
             if (!dispatched) {
                 showMessage("Unable to place call on this device.")
@@ -1548,7 +1511,7 @@ class VoxLineViewModel(application: Application) : AndroidViewModel(application)
             if (res.isSuccess) {
                 val s = res.getOrThrow()
                 showMessage(
-                    "Synced ${s.callLogsCount} calls, ${s.contactsCount} contacts, ${s.spamRulesCount} spam rules."
+                    "Synced ${s.callLogsCount} calls, ${s.contactsCount} contacts."
                 )
             } else {
                 showMessage("Sync decrypt failed: check passphrase or file.")
@@ -1692,6 +1655,12 @@ class VoxLineViewModel(application: Application) : AndroidViewModel(application)
         if (callLogObserverRegistered) {
             runCatching { resolver.unregisterContentObserver(callLogContentObserver) }
             callLogObserverRegistered = false
+        }
+        if (subscriptionsListenerRegistered) {
+            val subManager = getApplication<Application>()
+                .getSystemService(Context.TELEPHONY_SUBSCRIPTION_SERVICE) as? SubscriptionManager
+            runCatching { subManager?.removeOnSubscriptionsChangedListener(subscriptionsChangedListener) }
+            subscriptionsListenerRegistered = false
         }
         ringtoneEngine.release()
         callRecordingManager.release()

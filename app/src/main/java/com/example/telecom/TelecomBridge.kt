@@ -16,6 +16,7 @@ import android.telecom.PhoneAccount
 import android.telecom.PhoneAccountHandle
 import android.telecom.TelecomManager
 import android.telephony.SubscriptionManager
+import android.telephony.TelephonyManager
 import androidx.core.content.ContextCompat
 
 data class SimSlotInfo(
@@ -23,7 +24,8 @@ data class SimSlotInfo(
     val slotIndex: Int,
     val displayName: String,
     val carrierName: String,
-    val isSystemDefault: Boolean = false
+    val isSystemDefault: Boolean = false,
+    val phoneAccountHandle: PhoneAccountHandle? = null
 )
 
 private val GENERIC_SLOT_REGEX = Regex("^(sim|slot|card|sub|subscription)\\s*\\d+$", RegexOption.IGNORE_CASE)
@@ -241,30 +243,195 @@ class TelecomBridge(private val context: Context) {
     }
 
     /**
-     * Reads real active SIM subscriptions from Android's SubscriptionManager and marks
-     * whichever SIM is set as the system default voice SIM in Android Phone Settings.
+     * Reads real active SIM subscriptions from Android's SubscriptionManager & TelecomManager,
+     * resolves each SIM's real carrier/company name, pairs its Telecom PhoneAccountHandle, and
+     * accurately detects whether a default calling SIM is selected in Android Phone Settings
+     * vs. "Ask every time" (no default calling SIM selected).
      */
     @SuppressLint("MissingPermission")
     fun detectActiveSims(): List<SimSlotInfo> {
-        if (!hasPhoneStatePermission()) {
+        if (!hasPhoneStatePermission() && !isDefaultDialer()) {
             return emptyList()
         }
         return try {
             val subManager = context.getSystemService(Context.TELEPHONY_SUBSCRIPTION_SERVICE) as? SubscriptionManager
-            val defaultVoiceSubId = SubscriptionManager.getDefaultVoiceSubscriptionId()
-            val list = subManager?.activeSubscriptionInfoList.orEmpty()
-            list.sortedBy { it.simSlotIndex }.map { info ->
-                val carrierFromNetwork = extractSimCompanyName(info.carrierName?.toString().orEmpty())
-                val carrierFromDisplay = extractSimCompanyName(info.displayName?.toString().orEmpty())
-                val cleanCompany = carrierFromNetwork.ifBlank { carrierFromDisplay }
+            val telecom = context.getSystemService(Context.TELECOM_SERVICE) as? TelecomManager
+            val telephonyManager = context.getSystemService(Context.TELEPHONY_SERVICE) as? TelephonyManager
+
+            val defaultVoiceSubId = runCatching {
+                SubscriptionManager.getDefaultVoiceSubscriptionId()
+            }.getOrDefault(SubscriptionManager.INVALID_SUBSCRIPTION_ID)
+
+            val defaultOutgoingResult = runCatching {
+                telecom?.getDefaultOutgoingPhoneAccount(PhoneAccount.SCHEME_TEL)
+            }
+            val defaultOutgoingHandle: PhoneAccountHandle? = defaultOutgoingResult.getOrNull()
+            val hasTelecomDefaultCheck = telecom != null && defaultOutgoingResult.isSuccess
+
+            val allHandles: List<PhoneAccountHandle> = runCatching {
+                telecom?.callCapablePhoneAccounts.orEmpty()
+            }.getOrDefault(emptyList())
+
+            val handleLabels = mutableMapOf<PhoneAccountHandle, String>()
+            val simHandles = allHandles.filter { handle ->
+                val account = runCatching { telecom?.getPhoneAccount(handle) }.getOrNull()
+                val label = account?.label?.toString()?.trim().orEmpty()
+                if (label.isNotEmpty()) {
+                    handleLabels[handle] = label
+                }
+                account == null || account.hasCapabilities(PhoneAccount.CAPABILITY_SIM_SUBSCRIPTION)
+            }.ifEmpty { allHandles }
+
+            val handleSubIds = mutableMapOf<PhoneAccountHandle, Int>()
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && telephonyManager != null) {
+                simHandles.forEach { handle ->
+                    val subId = runCatching { telephonyManager.getSubscriptionId(handle) }
+                        .getOrDefault(SubscriptionManager.INVALID_SUBSCRIPTION_ID)
+                    if (subId != SubscriptionManager.INVALID_SUBSCRIPTION_ID) {
+                        handleSubIds[handle] = subId
+                    }
+                }
+            }
+
+            val sortedSubs = runCatching {
+                subManager?.activeSubscriptionInfoList.orEmpty()
+            }.getOrDefault(emptyList()).sortedBy { it.simSlotIndex }
+
+            // Fallback when SubscriptionManager returns empty but Telecom exposes SIM phone accounts
+            if (sortedSubs.isEmpty()) {
+                if (simHandles.isEmpty()) return emptyList()
+                return simHandles.mapIndexed { idx, handle ->
+                    val cleanCompany = extractSimCompanyName(handleLabels[handle].orEmpty())
+                    val isDefault = when {
+                        simHandles.size == 1 -> true
+                        hasTelecomDefaultCheck -> defaultOutgoingHandle != null &&
+                            (handle == defaultOutgoingHandle || handle.id == defaultOutgoingHandle.id)
+                        else -> false
+                    }
+                    SimSlotInfo(
+                        subscriptionId = handleSubIds[handle] ?: SubscriptionManager.INVALID_SUBSCRIPTION_ID,
+                        slotIndex = idx,
+                        displayName = cleanCompany,
+                        carrierName = cleanCompany,
+                        isSystemDefault = isDefault,
+                        phoneAccountHandle = handle
+                    )
+                }
+            }
+
+            val usedHandles = mutableSetOf<PhoneAccountHandle>()
+            val pairedEntries = sortedSubs.mapIndexed { idx, info ->
+                val iccId = runCatching { info.iccId?.trim().orEmpty() }.getOrDefault("")
+                val subIdStr = info.subscriptionId.toString()
+                val rawSubCarrier = info.carrierName?.toString()?.trim().orEmpty()
+                val rawSubDisplay = info.displayName?.toString()?.trim().orEmpty()
+
+                val matchedHandle = simHandles.firstOrNull { h ->
+                    h !in usedHandles && handleSubIds[h] == info.subscriptionId
+                } ?: simHandles.firstOrNull { h ->
+                    val hid = h.id?.trim().orEmpty()
+                    h !in usedHandles && hid.isNotEmpty() && (
+                        hid.equals(subIdStr, ignoreCase = true) ||
+                            (iccId.isNotEmpty() && (
+                                hid.equals(iccId, ignoreCase = true) ||
+                                    hid.startsWith(iccId, ignoreCase = true) ||
+                                    iccId.startsWith(hid, ignoreCase = true)
+                                ))
+                        )
+                } ?: simHandles.firstOrNull { h ->
+                    val label = handleLabels[h].orEmpty()
+                    h !in usedHandles && label.isNotBlank() && (
+                        (rawSubCarrier.isNotBlank() && label.contains(rawSubCarrier, ignoreCase = true)) ||
+                            (rawSubDisplay.isNotBlank() && label.contains(rawSubDisplay, ignoreCase = true))
+                        )
+                } ?: simHandles.getOrNull(idx)?.takeIf { it !in usedHandles }
+                    ?: simHandles.firstOrNull { it !in usedHandles }
+
+                if (matchedHandle != null) {
+                    usedHandles.add(matchedHandle)
+                }
+
+                val subTelephony = runCatching {
+                    telephonyManager?.createForSubscriptionId(info.subscriptionId)
+                }.getOrNull()
+
+                val cleanCompany = listOf(
+                    extractSimCompanyName(rawSubCarrier),
+                    extractSimCompanyName(runCatching { subTelephony?.networkOperatorName.orEmpty() }.getOrDefault("")),
+                    extractSimCompanyName(runCatching { subTelephony?.simOperatorName.orEmpty() }.getOrDefault("")),
+                    extractSimCompanyName(matchedHandle?.let { handleLabels[it] }.orEmpty()),
+                    extractSimCompanyName(rawSubDisplay)
+                ).firstOrNull { it.isNotBlank() }.orEmpty()
+
+                Triple(info, matchedHandle, cleanCompany)
+            }
+
+            val defaultHandleSubId = if (
+                defaultOutgoingHandle != null &&
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
+                telephonyManager != null
+            ) {
+                runCatching { telephonyManager.getSubscriptionId(defaultOutgoingHandle) }
+                    .getOrDefault(SubscriptionManager.INVALID_SUBSCRIPTION_ID)
+            } else {
+                SubscriptionManager.INVALID_SUBSCRIPTION_ID
+            }
+
+            val mapped = pairedEntries.map { (info, matchedHandle, cleanCompany) ->
+                val iccId = runCatching { info.iccId?.trim().orEmpty() }.getOrDefault("")
+                val matchesDefaultHandle = defaultOutgoingHandle != null && (
+                    matchedHandle == defaultOutgoingHandle ||
+                        (matchedHandle != null && matchedHandle.id == defaultOutgoingHandle.id) ||
+                        (defaultHandleSubId != SubscriptionManager.INVALID_SUBSCRIPTION_ID &&
+                            defaultHandleSubId == info.subscriptionId) ||
+                        defaultOutgoingHandle.id.equals(info.subscriptionId.toString(), ignoreCase = true) ||
+                        (iccId.isNotEmpty() && (
+                            defaultOutgoingHandle.id.equals(iccId, ignoreCase = true) ||
+                                defaultOutgoingHandle.id.startsWith(iccId, ignoreCase = true) ||
+                                iccId.startsWith(defaultOutgoingHandle.id, ignoreCase = true)
+                            ))
+                    )
+
+                val isDefault = when {
+                    pairedEntries.size == 1 -> true
+                    hasTelecomDefaultCheck -> defaultOutgoingHandle != null && matchesDefaultHandle
+                    else -> defaultVoiceSubId != SubscriptionManager.INVALID_SUBSCRIPTION_ID &&
+                        info.subscriptionId == defaultVoiceSubId
+                }
+
                 SimSlotInfo(
                     subscriptionId = info.subscriptionId,
                     slotIndex = info.simSlotIndex,
                     displayName = cleanCompany,
                     carrierName = cleanCompany,
-                    isSystemDefault = defaultVoiceSubId != SubscriptionManager.INVALID_SUBSCRIPTION_ID &&
-                        info.subscriptionId == defaultVoiceSubId
+                    isSystemDefault = isDefault,
+                    phoneAccountHandle = matchedHandle
                 )
+            }
+
+            // If Android Telecom reported a non-null default outgoing PhoneAccountHandle on a dual-SIM
+            // device but OEM handle IDs didn't match above, resolve via defaultVoiceSubId or account label
+            // so we still accurately reflect that a single default calling SIM is selected.
+            if (mapped.size >= 2 && hasTelecomDefaultCheck && defaultOutgoingHandle != null && mapped.none { it.isSystemDefault }) {
+                val defaultLabelCompany = extractSimCompanyName(
+                    runCatching {
+                        telecom?.getPhoneAccount(defaultOutgoingHandle)?.label?.toString().orEmpty()
+                    }.getOrDefault("")
+                )
+                val fallbackIndex = mapped.indexOfFirst {
+                    defaultVoiceSubId != SubscriptionManager.INVALID_SUBSCRIPTION_ID &&
+                        it.subscriptionId == defaultVoiceSubId
+                }.takeIf { it >= 0 }
+                    ?: mapped.indexOfFirst {
+                        defaultLabelCompany.isNotBlank() &&
+                            it.carrierName.equals(defaultLabelCompany, ignoreCase = true)
+                    }.takeIf { it >= 0 }
+                    ?: 0
+                mapped.mapIndexed { idx, sim ->
+                    if (idx == fallbackIndex) sim.copy(isSystemDefault = true) else sim
+                }
+            } else {
+                mapped
             }
         } catch (_: Exception) {
             emptyList()
@@ -351,13 +518,15 @@ class TelecomBridge(private val context: Context) {
 
     /**
      * Dispatches a real cellular SIM call via Android Telecom or standard ACTION_DIAL intent.
+     * When preferredSim is provided, routes the call directly through that SIM's PhoneAccountHandle.
      * When preferredSlotIndex is DEFAULT_SIM_SLOT_INDEX (-1), uses the SIM selected in
      * Android Phone Settings (default outgoing voice account).
      */
     @SuppressLint("MissingPermission")
     fun placeCarrierSimCall(
         number: String,
-        preferredSlotIndex: Int = DEFAULT_SIM_SLOT_INDEX
+        preferredSlotIndex: Int = DEFAULT_SIM_SLOT_INDEX,
+        preferredSim: SimSlotInfo? = null
     ): Boolean {
         val sanitized = number.trim()
         if (sanitized.isEmpty()) return false
@@ -368,8 +537,20 @@ class TelecomBridge(private val context: Context) {
                 val telecom = context.getSystemService(Context.TELECOM_SERVICE) as? TelecomManager
                 if (telecom != null) {
                     val extras = Bundle()
-                    if (hasPhoneStatePermission()) {
-                        if (preferredSlotIndex == DEFAULT_SIM_SLOT_INDEX) {
+                    if (hasPhoneStatePermission() || isDefaultDialer()) {
+                        if (preferredSim != null) {
+                            val resolvedHandle = preferredSim.phoneAccountHandle ?: run {
+                                val accounts = runCatching { telecom.callCapablePhoneAccounts }.getOrNull().orEmpty()
+                                accounts.firstOrNull {
+                                    preferredSim.subscriptionId != SubscriptionManager.INVALID_SUBSCRIPTION_ID &&
+                                        it.id.equals(preferredSim.subscriptionId.toString(), ignoreCase = true)
+                                } ?: accounts.getOrNull(preferredSim.slotIndex)
+                                    ?: accounts.firstOrNull()
+                            }
+                            if (resolvedHandle != null) {
+                                extras.putParcelable(TelecomManager.EXTRA_PHONE_ACCOUNT_HANDLE, resolvedHandle)
+                            }
+                        } else if (preferredSlotIndex == DEFAULT_SIM_SLOT_INDEX) {
                             val defaultHandle = runCatching {
                                 telecom.getDefaultOutgoingPhoneAccount(PhoneAccount.SCHEME_TEL)
                             }.getOrNull()

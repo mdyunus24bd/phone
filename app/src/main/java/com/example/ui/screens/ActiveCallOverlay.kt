@@ -424,10 +424,6 @@ fun ActiveCallOverlay(
                             modifier = Modifier.padding(horizontal = 14.dp, vertical = 5.dp)
                         )
                     }
-
-                    session.spamAssessment?.takeIf { it.level != SpamRiskLevel.SAFE }?.let { spam ->
-                        SpamRiskChip(level = spam.level, score = spam.score)
-                    }
                 }
 
                 // Bottom Incoming Action Deck: Quick Reply SMS + Slide to Answer / Reject
@@ -686,7 +682,7 @@ fun ActiveCallOverlay(
                         )
                     }
 
-                    // Active Status Chips (Muted / On Hold / Spam Alert)
+                    // Active Status Chips (Muted / On Hold)
                     Row(
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                         verticalAlignment = Alignment.CenterVertically
@@ -716,9 +712,6 @@ fun ActiveCallOverlay(
                                     modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
                                 )
                             }
-                        }
-                        session.spamAssessment?.takeIf { it.level != SpamRiskLevel.SAFE }?.let { spam ->
-                            SpamRiskChip(level = spam.level, score = spam.score)
                         }
                     }
                 }

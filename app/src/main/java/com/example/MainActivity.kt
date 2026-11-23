@@ -216,7 +216,6 @@ private fun VoxLineRootApp(
     val previewingRingtoneUri by viewModel.previewingRingtoneUri.collectAsStateWithLifecycle()
     val liveProbe by viewModel.liveQualityProbe.collectAsStateWithLifecycle()
     val isProbingQuality by viewModel.isProbingQuality.collectAsStateWithLifecycle()
-    val dialerSpam by viewModel.dialerSpamAssessment.collectAsStateWithLifecycle()
     val snackbarMsg by viewModel.snackbarMessage.collectAsStateWithLifecycle()
 
     // App opens directly to Recents Call screen
@@ -556,9 +555,6 @@ private fun VoxLineRootApp(
                                 onToggleFavorite = viewModel::toggleFavoriteContact,
                                 onTogglePlayback = viewModel::togglePlayback,
                                 onShareRecording = viewModel::shareRecording,
-                                onReportSpam = { num ->
-                                    viewModel.addSpamRule(num, "Reported Spam", 95, true)
-                                },
                                 onDeleteLog = viewModel::deleteCallLog,
                                 onOpenSettings = { openSettingsAtTab(currentControlTab) }
                             )
@@ -566,7 +562,6 @@ private fun VoxLineRootApp(
                             VoxDestination.RECENTS -> RecentsScreen(
                                 callLogs = callLogs,
                                 contacts = contacts,
-                                spamRules = spamRules,
                                 isDefaultDialer = isDefaultDialer,
                                 canShowIncomingOverDisplay = canShowIncomingOverDisplay,
                                 recordings = recordings,
@@ -589,11 +584,6 @@ private fun VoxLineRootApp(
                                 onTogglePlayback = viewModel::togglePlayback,
                                 onShareRecording = viewModel::shareRecording,
                                 onDeleteRecording = viewModel::deleteRecording,
-                                onReportSpam = { num ->
-                                    viewModel.addSpamRule(num, "Reported Spam", 95, true)
-                                },
-                                onUnblockNumber = viewModel::unblockPhoneNumber,
-                                onOpenBlockedNumbers = { showBlockedNumbersScreen = true },
                                 onDeleteLog = viewModel::deleteCallLog,
                                 onSaveCallNote = viewModel::saveCallLogNote,
                                 onOpenRecordingSettings = {
@@ -624,9 +614,6 @@ private fun VoxLineRootApp(
                                 },
                                 onTogglePlayback = viewModel::togglePlayback,
                                 onShareRecording = viewModel::shareRecording,
-                                onReportSpam = { num ->
-                                    viewModel.addSpamRule(num, "Reported Spam", 95, true)
-                                },
                                 onDeleteLog = viewModel::deleteCallLog,
                                 onImportDeviceContacts = {
                                     if (ContextCompat.checkSelfPermission(
@@ -660,10 +647,8 @@ private fun VoxLineRootApp(
                 activeSims = activeSims,
                 contacts = contacts,
                 callLogs = callLogs,
-                spamRules = spamRules,
                 isDefaultDialer = isDefaultDialer,
                 hasPhoneStatePermission = hasPhoneStatePermission,
-                spamAssessment = dialerSpam,
                 themeMode = settings.themeMode,
                 keypadLayout = settings.keypadLayout,
                 dialerSize = settings.dialerSizeOption,
@@ -689,9 +674,11 @@ private fun VoxLineRootApp(
                     )
                 },
                 onOpenPhoneSimSettings = viewModel::openPhoneSimSettings,
-                onPlaceCall = { addr ->
-                    showKeypadPage = false
-                    viewModel.startCall(address = addr)
+                onPlaceCall = { addr, preferredSim ->
+                    if (addr.isNotBlank()) {
+                        showKeypadPage = false
+                    }
+                    viewModel.startCall(address = addr, preferredSim = preferredSim)
                 },
                 onAddNewContact = { number ->
                     contactEditorRequest = ContactEditorRequest(
@@ -813,12 +800,7 @@ private fun VoxLineRootApp(
                 onAddQuickReplyTemplate = viewModel::addQuickReplyTemplate,
                 onRemoveQuickReplyTemplate = viewModel::removeQuickReplyTemplate,
                 onResetQuickReplyTemplates = viewModel::resetQuickReplyTemplates,
-                onToggleSpamShield = viewModel::setSpamShield,
-                onToggleAutoBlock = viewModel::setAutoBlockSpam,
                 onOpenBlockedNumbers = { showBlockedNumbersScreen = true },
-                onAddSpamRule = viewModel::addSpamRule,
-                onDeleteSpamRule = viewModel::deleteSpamRule,
-                onCheckSpamNumber = viewModel::evaluateManualSpamCheck,
                 onSetThemeMode = viewModel::setThemeMode,
                 onSetAccentPalette = viewModel::setAccentPalette,
                 onSetHighContrast = viewModel::setHighContrast,

@@ -45,7 +45,6 @@ import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.HorizontalDivider
@@ -139,7 +138,6 @@ fun NumberCallHistoryDialog(
     onAddContact: (() -> Unit)?,
     onTogglePlayback: (CallRecordingEntity) -> Unit,
     onShareRecording: ((CallRecordingEntity) -> Unit)? = null,
-    onReportSpam: (String) -> Unit,
     onDeleteLog: (Long) -> Unit,
     onEditNote: ((CallLogEntity) -> Unit)? = null
 ) {
@@ -154,15 +152,12 @@ fun NumberCallHistoryDialog(
     }
 
     var linkedAccounts by remember { mutableStateOf<List<LinkedAccountGroup>>(emptyList()) }
-    var isLoadingLinkedAccounts by remember { mutableStateOf(true) }
     LaunchedEffect(simNumber, phoneNumber, matchedContact?.deviceContactId) {
-        isLoadingLinkedAccounts = true
         linkedAccounts = ContactLinkedAccountsResolver.resolveLinkedAccounts(
             context = context,
             phoneNumber = simNumber.ifBlank { phoneNumber },
             deviceContactId = matchedContact?.deviceContactId ?: 0L
         )
-        isLoadingLinkedAccounts = false
     }
 
     val stats = remember(allLogsForNumber) {
@@ -380,55 +375,36 @@ fun NumberCallHistoryDialog(
                                     }
                                 }
 
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                ) {
-                                    if (matchedContact == null && onAddContact != null) {
-                                        FilledTonalButton(
-                                            onClick = onAddContact,
-                                            modifier = Modifier
-                                                .weight(1f)
-                                                .testTag("history_add_contact_button")
-                                        ) {
-                                            Icon(
-                                                imageVector = Icons.Filled.PersonAdd,
-                                                contentDescription = "Add Contact",
-                                                modifier = Modifier.size(17.dp)
-                                            )
-                                            Spacer(Modifier.width(6.dp))
-                                            Text("Add Contact")
-                                        }
-                                    }
-                                    OutlinedButton(
-                                        onClick = { onReportSpam(simNumber.ifBlank { phoneNumber }) },
+                                if (matchedContact == null && onAddContact != null) {
+                                    FilledTonalButton(
+                                        onClick = onAddContact,
                                         modifier = Modifier
-                                            .weight(1f)
-                                            .testTag("history_spam_shield_button")
+                                            .fillMaxWidth()
+                                            .testTag("history_add_contact_button")
                                     ) {
                                         Icon(
-                                            imageVector = Icons.Filled.Shield,
-                                            contentDescription = "Spam Shield",
-                                            tint = SpamWarningCoral,
+                                            imageVector = Icons.Filled.PersonAdd,
+                                            contentDescription = "Add Contact",
                                             modifier = Modifier.size(17.dp)
                                         )
                                         Spacer(Modifier.width(6.dp))
-                                        Text("Spam Shield")
+                                        Text("Add Contact")
                                     }
                                 }
                             }
                         }
                     }
 
-                    // Linked Accounts Section (WhatsApp, imo, Telegram, Viber, Signal, etc.)
-                    item {
-                        LinkedAccountsCard(
-                            groups = linkedAccounts,
-                            isLoading = isLoadingLinkedAccounts,
-                            onActionClick = { action ->
-                                ContactLinkedAccountsResolver.launchLinkedAccountAction(context, action)
-                            }
-                        )
+                    // Linked Accounts Section — shown ONLY when linked accounts are actually available
+                    if (linkedAccounts.isNotEmpty()) {
+                        item {
+                            LinkedAccountsCard(
+                                groups = linkedAccounts,
+                                onActionClick = { action ->
+                                    ContactLinkedAccountsResolver.launchLinkedAccountAction(context, action)
+                                }
+                            )
+                        }
                     }
 
                     // Call Summary Metrics Strip
@@ -532,9 +508,10 @@ fun NumberCallHistoryDialog(
 @Composable
 private fun LinkedAccountsCard(
     groups: List<LinkedAccountGroup>,
-    isLoading: Boolean,
     onActionClick: (LinkedAccountAction) -> Unit
 ) {
+    if (groups.isEmpty()) return
+
     Card(
         shape = RoundedCornerShape(20.dp),
         colors = CardDefaults.cardColors(
@@ -567,54 +544,21 @@ private fun LinkedAccountsCard(
                     fontWeight = FontWeight.SemiBold,
                     color = MaterialTheme.colorScheme.onSurface
                 )
-                if (groups.isNotEmpty()) {
-                    Surface(
-                        shape = RoundedCornerShape(999.dp),
-                        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.7f)
-                    ) {
-                        Text(
-                            text = "${groups.size}",
-                            style = MaterialTheme.typography.labelSmall,
-                            fontWeight = FontWeight.SemiBold,
-                            color = MaterialTheme.colorScheme.onPrimaryContainer,
-                            modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp)
-                        )
-                    }
+                Surface(
+                    shape = RoundedCornerShape(999.dp),
+                    color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.7f)
+                ) {
+                    Text(
+                        text = "${groups.size}",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onPrimaryContainer,
+                        modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp)
+                    )
                 }
             }
 
-            when {
-                isLoading -> {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(10.dp)
-                    ) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(16.dp),
-                            strokeWidth = 2.dp
-                        )
-                        Text(
-                            text = "Checking linked accounts (WhatsApp, imo, Telegram)...",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                }
-
-                groups.isEmpty() -> {
-                    Text(
-                        text = "No linked messaging accounts (WhatsApp, imo, Telegram, Viber) found for this number on this device.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.testTag("linked_accounts_empty_text")
-                    )
-                }
-
-                else -> {
-                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         groups.forEachIndexed { index, group ->
                             if (index > 0) {
                                 HorizontalDivider(
@@ -727,8 +671,6 @@ private fun LinkedAccountsCard(
                             }
                         }
                     }
-                }
-            }
         }
     }
 }

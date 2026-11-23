@@ -455,7 +455,7 @@ fun BlockedNumbersScreen(
                                 value = labelInput,
                                 onValueChange = { labelInput = it },
                                 label = { Text("Reason / Label (optional)") },
-                                placeholder = { Text("e.g. Telemarketer, Spam, Unwanted") },
+                                placeholder = { Text("e.g. Telemarketer, Unwanted") },
                                 singleLine = true,
                                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
                                 keyboardActions = KeyboardActions(onDone = { submitManualBlock() }),

@@ -96,7 +96,6 @@ import com.example.data.local.CallDirection
 import com.example.data.local.CallLogEntity
 import com.example.data.local.CallRecordingEntity
 import com.example.data.local.ContactEntity
-import com.example.data.local.SpamRuleEntity
 import com.example.telecom.PhoneCountryResolver
 import com.example.ui.components.ContactAvatar
 import com.example.ui.components.MosBadge
@@ -105,12 +104,10 @@ import com.example.ui.components.QuickCallNoteDialog
 import com.example.ui.components.formatDuration
 import com.example.ui.components.formatTimestamp
 import com.example.ui.components.matchesCallHistoryTarget
-import com.example.ui.components.normalizeCallHistoryKey
 import com.example.ui.theme.AccentSkyBlue
 import com.example.ui.theme.CallAcceptGreen
 import com.example.ui.theme.CallEndRed
 import com.example.ui.theme.MonoMetricStyle
-import com.example.ui.theme.SpamWarningCoral
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
@@ -118,15 +115,13 @@ private enum class RecentsFilter(val label: String) {
     ALL("All"),
     MISSED("Missed"),
     NOTES("Notes"),
-    RECORDED("Recorded"),
-    BLOCKED("Spam")
+    RECORDED("Recorded")
 }
 
 @Composable
 fun RecentsScreen(
     callLogs: List<CallLogEntity>,
     contacts: List<ContactEntity>,
-    spamRules: List<SpamRuleEntity> = emptyList(),
     isDefaultDialer: Boolean,
     canShowIncomingOverDisplay: Boolean = true,
     recordings: List<CallRecordingEntity>,
@@ -141,9 +136,6 @@ fun RecentsScreen(
     onTogglePlayback: (CallRecordingEntity) -> Unit,
     onShareRecording: (CallRecordingEntity) -> Unit = {},
     onDeleteRecording: (CallRecordingEntity) -> Unit,
-    onReportSpam: (String) -> Unit,
-    onUnblockNumber: (SpamRuleEntity) -> Unit = {},
-    onOpenBlockedNumbers: () -> Unit = {},
     onDeleteLog: (Long) -> Unit,
     onSaveCallNote: (Long, String) -> Unit = { _, _ -> },
     onOpenRecordingSettings: () -> Unit,
@@ -164,39 +156,18 @@ fun RecentsScreen(
         }.toMap()
     }
 
-    val blockedRules = remember(spamRules) {
-        spamRules.filter { it.autoBlock }
-    }
-
-    // Separate regular recent calls from spam & blocked calls so spam/blocked appear ONLY in Spam menu
-    val recentOnlyLogs = remember(callLogs, blockedRules) {
-        callLogs.filterNot { isSpamOrBlockedCallLog(it, blockedRules) }
-    }
-    val spamOnlyLogs = remember(callLogs, blockedRules) {
-        callLogs.filter { isSpamOrBlockedCallLog(it, blockedRules) }
-    }
-
     // Deduplicated groups: each phone number appears ONLY ONCE
-    val allRecentGroups = remember(recentOnlyLogs) {
-        groupCallLogsByUniqueNumber(recentOnlyLogs, preferLatestMissedAsRepresentative = false)
+    val allRecentGroups = remember(callLogs) {
+        groupCallLogsByUniqueNumber(callLogs, preferLatestMissedAsRepresentative = false)
     }
-    val missedRecentGroups = remember(recentOnlyLogs) {
-        groupCallLogsByUniqueNumber(recentOnlyLogs, preferLatestMissedAsRepresentative = true)
+    val missedRecentGroups = remember(callLogs) {
+        groupCallLogsByUniqueNumber(callLogs, preferLatestMissedAsRepresentative = true)
             .filter { it.missedCalls > 0 }
     }
-    val spamCallGroups = remember(spamOnlyLogs) {
-        groupCallLogsByUniqueNumber(spamOnlyLogs, preferLatestMissedAsRepresentative = false)
-    }
-    val notedLogs = remember(recentOnlyLogs) {
-        recentOnlyLogs
+    val notedLogs = remember(callLogs) {
+        callLogs
             .filter { it.quickNote.isNotBlank() }
             .sortedByDescending { it.timestamp }
-    }
-
-    val spamTotalCount = remember(blockedRules, spamCallGroups) {
-        val ruleKeys = blockedRules.map { normalizeCallHistoryKey(it.pattern) }.toSet()
-        val extraCallKeys = spamCallGroups.count { it.numberKey !in ruleKeys }
-        blockedRules.size + extraCallKeys
     }
 
     Box(
@@ -390,13 +361,6 @@ fun RecentsScreen(
             item {
                 LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     items(RecentsFilter.entries) { filter ->
-                        val badgeCount = when (filter) {
-                            RecentsFilter.ALL -> allRecentGroups.size
-                            RecentsFilter.MISSED -> missedRecentGroups.size
-                            RecentsFilter.NOTES -> notedLogs.size
-                            RecentsFilter.RECORDED -> recordings.size
-                            RecentsFilter.BLOCKED -> spamTotalCount
-                        }
                         FilterChip(
                             selected = selectedFilter == filter,
                             onClick = {
@@ -405,13 +369,7 @@ fun RecentsScreen(
                                 openSwipeNumberKey = null
                             },
                             label = {
-                                Text(
-                                    if (badgeCount > 0 && filter != RecentsFilter.ALL) {
-                                        "${filter.label} ($badgeCount)"
-                                    } else {
-                                        filter.label
-                                    }
-                                )
+                                Text(filter.label)
                             },
                             modifier = Modifier.testTag("recents_filter_${filter.name.lowercase()}")
                         )
@@ -439,7 +397,6 @@ fun RecentsScreen(
                             SwipeableCallLogItem(
                                 group = group,
                                 matchedContact = matchedContact,
-                                showSpamStyle = false,
                                 isExpanded = expandedNumberKey == group.numberKey,
                                 isSwipedOpen = openSwipeNumberKey == group.numberKey,
                                 onToggleExpand = {
@@ -464,7 +421,6 @@ fun RecentsScreen(
                                 onOpenNote = { noteTargetLog = log },
                                 onCallBack = { onCallBack(log.phoneNumber) },
                                 onAddNewContact = { onOpenAddContact(log.phoneNumber, log.resolvedContactName) },
-                                onReportSpam = { onReportSpam(log.phoneNumber) },
                                 onDelete = {
                                     if (openSwipeNumberKey == group.numberKey) openSwipeNumberKey = null
                                     if (expandedNumberKey == group.numberKey) expandedNumberKey = null
@@ -493,7 +449,6 @@ fun RecentsScreen(
                             SwipeableCallLogItem(
                                 group = group,
                                 matchedContact = matchedContact,
-                                showSpamStyle = false,
                                 isExpanded = expandedNumberKey == group.numberKey,
                                 isSwipedOpen = openSwipeNumberKey == group.numberKey,
                                 onToggleExpand = {
@@ -518,7 +473,6 @@ fun RecentsScreen(
                                 onOpenNote = { noteTargetLog = log },
                                 onCallBack = { onCallBack(log.phoneNumber) },
                                 onAddNewContact = { onOpenAddContact(log.phoneNumber, log.resolvedContactName) },
-                                onReportSpam = { onReportSpam(log.phoneNumber) },
                                 onDelete = {
                                     if (openSwipeNumberKey == group.numberKey) openSwipeNumberKey = null
                                     if (expandedNumberKey == group.numberKey) expandedNumberKey = null
@@ -611,100 +565,6 @@ fun RecentsScreen(
                         }
                     }
                 }
-
-                RecentsFilter.BLOCKED -> {
-                    if (blockedRules.isEmpty() && spamCallGroups.isEmpty()) {
-                        item {
-                            RecentsEmptyStateCard(
-                                icon = Icons.Filled.Shield,
-                                title = "No Spam or Blocked Numbers",
-                                subtitle = "Blocked numbers and spam-flagged calls will appear here instead of your Recent Calls list.",
-                                actionLabel = "Manage Blocked Numbers",
-                                onAction = onOpenBlockedNumbers
-                            )
-                        }
-                    } else {
-                        if (blockedRules.isNotEmpty()) {
-                            item {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Text(
-                                        text = "Blocked Numbers (${blockedRules.size})",
-                                        style = MaterialTheme.typography.titleSmall,
-                                        color = CallEndRed
-                                    )
-                                    TextButton(
-                                        onClick = onOpenBlockedNumbers,
-                                        modifier = Modifier.testTag("spam_menu_manage_blocked_button")
-                                    ) {
-                                        Text("Manage")
-                                    }
-                                }
-                            }
-                            items(blockedRules, key = { "blocked_rule_${it.id}" }) { rule ->
-                                BlockedNumberSpamMenuCard(
-                                    rule = rule,
-                                    onUnblock = { onUnblockNumber(rule) }
-                                )
-                            }
-                        }
-
-                        if (spamCallGroups.isNotEmpty()) {
-                            item {
-                                Text(
-                                    text = "Spam & Blocked Calls (${spamCallGroups.size})",
-                                    style = MaterialTheme.typography.titleSmall,
-                                    color = SpamWarningCoral,
-                                    modifier = Modifier.padding(top = if (blockedRules.isNotEmpty()) 6.dp else 0.dp)
-                                )
-                            }
-                            items(spamCallGroups, key = { "spam_${it.numberKey}" }) { group ->
-                                val log = group.latestLog
-                                val logDigits = log.phoneNumber.filter { it.isDigit() }
-                                val matchedContact = log.contactInfo.contactId?.let { contactsById[it] }
-                                    ?: contactsByDigits[logDigits]
-                                SwipeableCallLogItem(
-                                    group = group,
-                                    matchedContact = matchedContact,
-                                    showSpamStyle = true,
-                                    isExpanded = expandedNumberKey == group.numberKey,
-                                    isSwipedOpen = openSwipeNumberKey == group.numberKey,
-                                    onToggleExpand = {
-                                        openSwipeNumberKey = null
-                                        expandedNumberKey = if (expandedNumberKey == group.numberKey) null else group.numberKey
-                                    },
-                                    onSwipeOpenChange = { shouldOpen ->
-                                        openSwipeNumberKey = if (shouldOpen) {
-                                            group.numberKey
-                                        } else if (openSwipeNumberKey == group.numberKey) {
-                                            null
-                                        } else {
-                                            openSwipeNumberKey
-                                        }
-                                    },
-                                    onSwipeStart = {
-                                        if (openSwipeNumberKey != null && openSwipeNumberKey != group.numberKey) {
-                                            openSwipeNumberKey = null
-                                        }
-                                    },
-                                    onOpenHistory = { historyTargetLog = log },
-                                    onOpenNote = { noteTargetLog = log },
-                                    onCallBack = { onCallBack(log.phoneNumber) },
-                                    onAddNewContact = { onOpenAddContact(log.phoneNumber, log.resolvedContactName) },
-                                    onReportSpam = { onReportSpam(log.phoneNumber) },
-                                    onDelete = {
-                                        if (openSwipeNumberKey == group.numberKey) openSwipeNumberKey = null
-                                        if (expandedNumberKey == group.numberKey) expandedNumberKey = null
-                                        group.logs.forEach { onDeleteLog(it.id) }
-                                    }
-                                )
-                            }
-                        }
-                    }
-                }
             }
         }
     }
@@ -737,7 +597,6 @@ fun RecentsScreen(
             },
             onTogglePlayback = onTogglePlayback,
             onShareRecording = onShareRecording,
-            onReportSpam = onReportSpam,
             onDeleteLog = onDeleteLog,
             onEditNote = { entry -> noteTargetLog = entry }
         )
@@ -766,7 +625,6 @@ fun RecentsScreen(
 private fun SwipeableCallLogItem(
     group: GroupedRecentCall,
     matchedContact: ContactEntity?,
-    showSpamStyle: Boolean,
     isExpanded: Boolean,
     isSwipedOpen: Boolean,
     onToggleExpand: () -> Unit,
@@ -776,7 +634,6 @@ private fun SwipeableCallLogItem(
     onOpenNote: () -> Unit,
     onCallBack: () -> Unit,
     onAddNewContact: () -> Unit,
-    onReportSpam: () -> Unit,
     onDelete: () -> Unit
 ) {
     val log = group.latestLog
@@ -886,7 +743,6 @@ private fun SwipeableCallLogItem(
             CallLogCard(
                 group = group,
                 matchedContact = matchedContact,
-                showSpamStyle = showSpamStyle,
                 isExpanded = isExpanded,
                 onCardClick = {
                     if (isSwipedOpen) {
@@ -899,7 +755,6 @@ private fun SwipeableCallLogItem(
                 onOpenNote = onOpenNote,
                 onCallBack = onCallBack,
                 onAddNewContact = onAddNewContact,
-                onReportSpam = onReportSpam,
                 onDelete = onDelete
             )
         }
@@ -911,14 +766,12 @@ private fun SwipeableCallLogItem(
 private fun CallLogCard(
     group: GroupedRecentCall,
     matchedContact: ContactEntity?,
-    showSpamStyle: Boolean,
     isExpanded: Boolean,
     onCardClick: () -> Unit,
     onOpenHistory: () -> Unit,
     onOpenNote: () -> Unit,
     onCallBack: () -> Unit,
     onAddNewContact: () -> Unit,
-    onReportSpam: () -> Unit,
     onDelete: () -> Unit
 ) {
     val log = group.latestLog
@@ -953,7 +806,7 @@ private fun CallLogCard(
             }
         ),
         border = when {
-            isLatestMissed || showSpamStyle -> BorderStroke(1.dp, CallEndRed.copy(alpha = 0.30f))
+            isLatestMissed -> BorderStroke(1.dp, CallEndRed.copy(alpha = 0.30f))
             else -> null
         },
         modifier = Modifier
@@ -1027,7 +880,7 @@ private fun CallLogCard(
                             text = baseTitle,
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = if (isLatestMissed) FontWeight.SemiBold else FontWeight.Medium,
-                            color = if (isLatestMissed || showSpamStyle) CallEndRed else MaterialTheme.colorScheme.onSurface,
+                            color = if (isLatestMissed) CallEndRed else MaterialTheme.colorScheme.onSurface,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.weight(1f, fill = false)
@@ -1073,8 +926,6 @@ private fun CallLogCard(
                             text = buildString {
                                 if (showMissedCount) {
                                     append("Missed (${group.missedCalls}) • ")
-                                } else if (showSpamStyle && group.blockedCalls > 0) {
-                                    append("Blocked • ")
                                 }
                                 if (resolvedName.isNotBlank()) append("${log.phoneNumber} • ")
                                 append(formatTimestamp(log.timestamp))
@@ -1190,38 +1041,23 @@ private fun CallLogCard(
                                 }
                             }
                         }
-                        if (showSpamStyle) {
-                            Surface(
-                                shape = RoundedCornerShape(8.dp),
-                                color = SpamWarningCoral.copy(alpha = 0.18f)
-                            ) {
-                                Text(
-                                    text = if (log.spamScore > 0) "SPAM ${log.spamScore}" else "BLOCKED",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = SpamWarningCoral,
-                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
-                                )
-                            }
-                        }
                     }
 
-                    // Action Buttons Row (Note, Add, History, Spam, Delete)
+                    // Action Buttons Row (Note, Add, History, Delete)
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        if (!showSpamStyle) {
-                            ExpandedNumberActionTile(
-                                icon = if (log.quickNote.isNotBlank()) Icons.Filled.EditNote else Icons.AutoMirrored.Filled.NoteAdd,
-                                label = "Note",
-                                tint = MaterialTheme.colorScheme.primary,
-                                onClick = onOpenNote,
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .testTag("note_recent_log_${log.id}")
-                            )
-                        }
-                        if (isUnknownContact && log.phoneNumber.isNotBlank() && !showSpamStyle) {
+                        ExpandedNumberActionTile(
+                            icon = if (log.quickNote.isNotBlank()) Icons.Filled.EditNote else Icons.AutoMirrored.Filled.NoteAdd,
+                            label = "Note",
+                            tint = MaterialTheme.colorScheme.primary,
+                            onClick = onOpenNote,
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("note_recent_log_${log.id}")
+                        )
+                        if (isUnknownContact && log.phoneNumber.isNotBlank()) {
                             ExpandedNumberActionTile(
                                 icon = Icons.Filled.PersonAdd,
                                 label = "Add",
@@ -1241,17 +1077,6 @@ private fun CallLogCard(
                                 .weight(1f)
                                 .testTag("open_number_history_${log.id}")
                         )
-                        if (!showSpamStyle) {
-                            ExpandedNumberActionTile(
-                                icon = Icons.Filled.Shield,
-                                label = "Spam",
-                                tint = SpamWarningCoral,
-                                onClick = onReportSpam,
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .testTag("spam_shield_recent_${log.id}")
-                            )
-                        }
                         ExpandedNumberActionTile(
                             icon = Icons.Filled.DeleteOutline,
                             label = "Delete",

@@ -95,20 +95,17 @@ import androidx.compose.ui.unit.sp
 import com.example.data.local.CallDirection
 import com.example.data.local.CallLogEntity
 import com.example.data.local.ContactEntity
-import com.example.data.local.SpamRuleEntity
 import com.example.data.preferences.AutoRecordMode
 import com.example.data.preferences.DialerSizeOption
 import com.example.data.preferences.KeypadLayoutStyle
 import com.example.telecom.PhoneCountryResolver
 import com.example.telecom.SimSlotInfo
-import com.example.telecom.SpamAssessment
-import com.example.telecom.SpamRiskLevel
 import com.example.ui.components.ContactAvatar
-import com.example.ui.components.SpamRiskChip
 import com.example.ui.components.formatTimestamp
 import com.example.ui.theme.AccentSkyBlue
 import com.example.ui.theme.CallAcceptGreen
 import com.example.ui.theme.CallEndRed
+import com.example.ui.theme.EmeraldPrimaryLight
 import com.example.ui.theme.MonoMetricStyle
 import com.example.ui.theme.SimAccentEmerald
 import com.example.ui.theme.ThemeMode
@@ -160,10 +157,8 @@ fun DialerScreen(
     activeSims: List<SimSlotInfo>,
     contacts: List<ContactEntity>,
     callLogs: List<CallLogEntity> = emptyList(),
-    spamRules: List<SpamRuleEntity> = emptyList(),
     isDefaultDialer: Boolean,
     hasPhoneStatePermission: Boolean,
-    spamAssessment: SpamAssessment?,
     themeMode: ThemeMode,
     keypadLayout: KeypadLayoutStyle,
     dialerSize: DialerSizeOption = DialerSizeOption.MEDIUM,
@@ -182,7 +177,7 @@ fun DialerScreen(
     onRequestDefaultDialer: () -> Unit,
     onRequestPhonePermissions: () -> Unit,
     onOpenPhoneSimSettings: () -> Unit,
-    onPlaceCall: (String) -> Unit,
+    onPlaceCall: (String, SimSlotInfo?) -> Unit,
     onAddNewContact: (String) -> Unit,
     onOpenSettings: () -> Unit,
     onOpenRecordingSettings: () -> Unit,
@@ -282,10 +277,8 @@ fun DialerScreen(
         }.toMap()
     }
 
-    val blockedRules = remember(spamRules) { spamRules.filter { it.autoBlock } }
-    val groupedRecentCalls = remember(callLogs, blockedRules) {
-        val nonSpamLogs = callLogs.filterNot { isSpamOrBlockedCallLog(it, blockedRules) }
-        groupCallLogsByUniqueNumber(nonSpamLogs, preferLatestMissedAsRepresentative = false)
+    val groupedRecentCalls = remember(callLogs) {
+        groupCallLogsByUniqueNumber(callLogs, preferLatestMissedAsRepresentative = false)
     }
 
     val displayedRecentLogs = remember(groupedRecentCalls, dialInput, contactsById, contactsByDigits) {
@@ -699,7 +692,7 @@ fun DialerScreen(
                                     matchedContact = matched,
                                     callingCountry = country,
                                     onFillNumber = { onSetDialInput(log.phoneNumber) },
-                                    onCallNow = { onPlaceCall(log.phoneNumber) }
+                                    onCallNow = { onPlaceCall(log.phoneNumber, null) }
                                 )
                             }
                         }
@@ -811,25 +804,6 @@ fun DialerScreen(
                                 style = MaterialTheme.typography.labelMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
-                        }
-                    }
-
-                    // Real-time Spam Assessment indicator for typed number
-                    AnimatedVisibility(visible = spamAssessment != null && spamAssessment.level != SpamRiskLevel.SAFE) {
-                        spamAssessment?.let { info ->
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                SpamRiskChip(level = info.level, score = info.score)
-                                Text(
-                                    text = info.reason,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                            }
                         }
                     }
                 }
@@ -948,16 +922,35 @@ fun DialerScreen(
                     }
                 }
 
-                // Bottom Action Row: Add Contact | Call Icon Button (Icon Only) | Clear
-                val sideActionSize = (54f * dialerSize.scale).dp.coerceIn(48.dp, 64.dp)
+                // Bottom Action Row:
+                // - If a default calling SIM is selected in Android Phone Settings (or <= 1 SIM active):
+                //   show ONE clean Call icon button.
+                // - If 2+ SIMs are active and NO default calling SIM is selected ("Ask every time"):
+                //   show TWO Call icon buttons with each SIM's detected company name inside.
+                val showDualSimCallButtons = activeSims.size >= 2 && activeSims.none { it.isSystemDefault }
+                val dualSimPair = if (showDualSimCallButtons) activeSims.take(2) else emptyList()
+
+                val sideActionSize = if (showDualSimCallButtons) {
+                    (48f * dialerSize.scale).dp.coerceIn(48.dp, 56.dp)
+                } else {
+                    (54f * dialerSize.scale).dp.coerceIn(48.dp, 64.dp)
+                }
                 val callActionSize = (68f * dialerSize.scale).dp.coerceIn(58.dp, 82.dp)
                 val callIconSize = (30f * dialerSize.scale).dp.coerceIn(24.dp, 36.dp)
+                val dualCallButtonHeight = (62f * dialerSize.scale).dp.coerceIn(56.dp, 74.dp)
+                val dualCallIconSize = (22f * dialerSize.scale).dp.coerceIn(19.dp, 26.dp)
+                val dualCompanyFontSize = (11f * dialerSize.scale).coerceIn(10f, 13f).sp
+
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(top = 2.dp, bottom = 6.dp),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceEvenly
+                    horizontalArrangement = if (showDualSimCallButtons) {
+                        Arrangement.spacedBy(8.dp)
+                    } else {
+                        Arrangement.SpaceEvenly
+                    }
                 ) {
                     Surface(
                         shape = CircleShape,
@@ -982,29 +975,90 @@ fun DialerScreen(
                         }
                     }
 
-                    // Clean Primary Call Icon-Only Action Button
-                    Surface(
-                        shape = CircleShape,
-                        color = Color.Transparent,
-                        modifier = Modifier
-                            .size(callActionSize)
-                            .clip(CircleShape)
-                            .background(
+                    if (showDualSimCallButtons) {
+                        dualSimPair.forEachIndexed { idx, sim ->
+                            val companyName = sim.carrierName.ifBlank { sim.displayName }.trim()
+                            val buttonBrush = if (idx == 0) {
                                 Brush.horizontalGradient(listOf(CallAcceptGreen, SimAccentEmerald))
-                            )
-                            .clickable {
-                                haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                                onPlaceCall(dialInput)
+                            } else {
+                                Brush.horizontalGradient(listOf(EmeraldPrimaryLight, CallAcceptGreen))
                             }
-                            .testTag("place_call_button")
-                    ) {
-                        Box(contentAlignment = Alignment.Center) {
-                            Icon(
-                                imageVector = Icons.Filled.Call,
-                                contentDescription = "Call",
-                                tint = Color.White,
-                                modifier = Modifier.size(callIconSize)
-                            )
+                            Surface(
+                                shape = RoundedCornerShape(999.dp),
+                                color = Color.Transparent,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(dualCallButtonHeight)
+                                    .clip(RoundedCornerShape(999.dp))
+                                    .background(buttonBrush)
+                                    .clickable {
+                                        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                        onPlaceCall(dialInput, sim)
+                                    }
+                                    .testTag(if (idx == 0) "place_call_button_sim_0" else "place_call_button_sim_1")
+                            ) {
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .padding(horizontal = 10.dp, vertical = 6.dp),
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    verticalArrangement = Arrangement.Center
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Filled.Call,
+                                        contentDescription = if (companyName.isNotBlank()) {
+                                            "Call with $companyName"
+                                        } else {
+                                            "Call"
+                                        },
+                                        tint = Color.White,
+                                        modifier = Modifier.size(
+                                            if (companyName.isNotBlank()) dualCallIconSize else callIconSize
+                                        )
+                                    )
+                                    if (companyName.isNotBlank()) {
+                                        Spacer(Modifier.height(2.dp))
+                                        Text(
+                                            text = companyName,
+                                            style = MaterialTheme.typography.labelSmall.copy(
+                                                fontWeight = FontWeight.SemiBold,
+                                                fontSize = dualCompanyFontSize,
+                                                lineHeight = (dualCompanyFontSize.value * 1.15f).sp
+                                            ),
+                                            color = Color.White,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                            textAlign = TextAlign.Center
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        // Clean Primary Call Icon-Only Action Button (default calling SIM selected)
+                        Surface(
+                            shape = CircleShape,
+                            color = Color.Transparent,
+                            modifier = Modifier
+                                .size(callActionSize)
+                                .clip(CircleShape)
+                                .background(
+                                    Brush.horizontalGradient(listOf(CallAcceptGreen, SimAccentEmerald))
+                                )
+                                .clickable {
+                                    haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                    onPlaceCall(dialInput, null)
+                                }
+                                .testTag("place_call_button")
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Icon(
+                                    imageVector = Icons.Filled.Call,
+                                    contentDescription = "Call",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(callIconSize)
+                                )
+                            }
                         }
                     }
 

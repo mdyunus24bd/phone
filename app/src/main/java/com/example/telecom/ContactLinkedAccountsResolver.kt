@@ -75,65 +75,6 @@ object ContactLinkedAccountsResolver {
         ContactsContract.CommonDataKinds.Im.CONTENT_ITEM_TYPE
     )
 
-    private data class KnownAppSpec(
-        val packageName: String,
-        val brand: LinkedAppBrand,
-        val buildUri: (digits: String, e164: String) -> String?
-    )
-
-    private val KNOWN_APPS = listOf(
-        KnownAppSpec(
-            packageName = "com.whatsapp",
-            brand = LinkedAppBrand.WHATSAPP,
-            buildUri = { digits, _ -> if (digits.isNotEmpty()) "https://api.whatsapp.com/send?phone=$digits" else null }
-        ),
-        KnownAppSpec(
-            packageName = "com.whatsapp.w4b",
-            brand = LinkedAppBrand.WHATSAPP_BUSINESS,
-            buildUri = { digits, _ -> if (digits.isNotEmpty()) "https://api.whatsapp.com/send?phone=$digits" else null }
-        ),
-        KnownAppSpec(
-            packageName = "com.imo.android.imoim",
-            brand = LinkedAppBrand.IMO,
-            buildUri = { _, e164 -> if (e164.isNotEmpty()) "tel:$e164" else null }
-        ),
-        KnownAppSpec(
-            packageName = "com.imo.android.imoimhd",
-            brand = LinkedAppBrand.IMO,
-            buildUri = { _, e164 -> if (e164.isNotEmpty()) "tel:$e164" else null }
-        ),
-        KnownAppSpec(
-            packageName = "com.imo.android.imoimlite",
-            brand = LinkedAppBrand.IMO,
-            buildUri = { _, e164 -> if (e164.isNotEmpty()) "tel:$e164" else null }
-        ),
-        KnownAppSpec(
-            packageName = "org.telegram.messenger",
-            brand = LinkedAppBrand.TELEGRAM,
-            buildUri = { digits, _ -> if (digits.isNotEmpty()) "https://t.me/+$digits" else null }
-        ),
-        KnownAppSpec(
-            packageName = "org.telegram.messenger.web",
-            brand = LinkedAppBrand.TELEGRAM,
-            buildUri = { digits, _ -> if (digits.isNotEmpty()) "https://t.me/+$digits" else null }
-        ),
-        KnownAppSpec(
-            packageName = "org.thunderdog.challegram",
-            brand = LinkedAppBrand.TELEGRAM,
-            buildUri = { digits, _ -> if (digits.isNotEmpty()) "https://t.me/+$digits" else null }
-        ),
-        KnownAppSpec(
-            packageName = "com.viber.voip",
-            brand = LinkedAppBrand.VIBER,
-            buildUri = { digits, _ -> if (digits.isNotEmpty()) "viber://contact?number=%2B$digits" else null }
-        ),
-        KnownAppSpec(
-            packageName = "org.thoughtcrime.securesms",
-            brand = LinkedAppBrand.SIGNAL,
-            buildUri = { digits, _ -> if (digits.isNotEmpty()) "https://signal.me/#p/+$digits" else null }
-        )
-    )
-
     suspend fun resolveLinkedAccounts(
         context: Context,
         phoneNumber: String,
@@ -141,11 +82,6 @@ object ContactLinkedAccountsResolver {
     ): List<LinkedAccountGroup> = withContext(Dispatchers.IO) {
         val cleanPhone = phoneNumber.trim()
         val digitsOnly = cleanPhone.filter { it.isDigit() }
-        val e164Number = if (cleanPhone.startsWith("+")) {
-            "+$digitsOnly"
-        } else {
-            digitsOnly
-        }
 
         val syncedActionsByApp = linkedMapOf<String, MutableList<LinkedAccountAction>>()
 
@@ -175,13 +111,10 @@ object ContactLinkedAccountsResolver {
         }
 
         val groups = mutableListOf<LinkedAccountGroup>()
-        val coveredBrands = mutableSetOf<LinkedAppBrand>()
-
         syncedActionsByApp.forEach { (_, actions) ->
             val first = actions.firstOrNull() ?: return@forEach
             val deduped = actions.distinctBy { "${it.actionKind}:${it.mimeType}" }
                 .sortedBy { actionSortOrder(it.actionKind) }
-            coveredBrands.add(first.brand)
             groups.add(
                 LinkedAccountGroup(
                     appName = first.appName,
@@ -193,41 +126,8 @@ object ContactLinkedAccountsResolver {
             )
         }
 
-        // Also detect installed apps (e.g. WhatsApp, imo, Telegram, Viber, Signal) for unsaved/unsynced numbers
-        if (digitsOnly.isNotEmpty()) {
-            for (spec in KNOWN_APPS) {
-                if (spec.brand in coveredBrands) continue
-                if (!isPackageInstalled(context, spec.packageName)) continue
-                coveredBrands.add(spec.brand)
-                val uri = spec.buildUri(digitsOnly, e164Number)
-                val appLabel = resolveInstalledAppName(context, spec.packageName, spec.brand.displayName)
-                groups.add(
-                    LinkedAccountGroup(
-                        appName = appLabel,
-                        packageName = spec.packageName,
-                        brand = spec.brand,
-                        isSyncedFromContacts = false,
-                        actions = listOf(
-                            LinkedAccountAction(
-                                id = "installed_${spec.packageName}_msg",
-                                dataId = 0L,
-                                appName = appLabel,
-                                packageName = spec.packageName,
-                                brand = spec.brand,
-                                actionLabel = "Open in $appLabel",
-                                actionKind = LinkedActionKind.MESSAGE,
-                                mimeType = "",
-                                fallbackUri = uri
-                            )
-                        )
-                    )
-                )
-            }
-        }
-
         groups.sortedWith(
-            compareByDescending<LinkedAccountGroup> { it.isSyncedFromContacts }
-                .thenBy { brandPriority(it.brand) }
+            compareBy<LinkedAccountGroup> { brandPriority(it.brand) }
                 .thenBy { it.appName.lowercase() }
         )
     }
@@ -486,13 +386,6 @@ object ContactLinkedAccountsResolver {
         }
 
         return false
-    }
-
-    private fun isPackageInstalled(context: Context, packageName: String): Boolean {
-        return runCatching {
-            context.packageManager.getPackageInfo(packageName, 0)
-            true
-        }.getOrDefault(false)
     }
 
     private fun resolveInstalledAppName(context: Context, packageName: String, fallback: String): String {

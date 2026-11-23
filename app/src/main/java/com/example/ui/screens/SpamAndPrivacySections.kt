@@ -630,7 +630,7 @@ fun PrivacySyncAndThemeSection(
                     text = if (settings.lastSyncTimestamp > 0L) {
                         "Last sync: ${formatTimestamp(settings.lastSyncTimestamp)} • SHA-256 #${settings.lastSyncChecksum}"
                     } else {
-                        "Export an encrypted .vxync snapshot of call logs, contacts, and spam rules to restore on another device."
+                        "Export an encrypted .vxync snapshot of call logs, contacts, and blocked numbers to restore on another device."
                     },
                     style = MonoMetricStyle,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -755,7 +755,7 @@ fun PrivacySyncAndThemeSection(
             onDismissRequest = { confirmWipe = false },
             title = { Text("Wipe Encrypted Vault?") },
             text = {
-                Text("This permanently deletes all stored call logs, encrypted recordings, contacts, and spam rules on this device.")
+                Text("This permanently deletes all stored call logs, encrypted recordings, contacts, and blocked numbers on this device.")
             },
             confirmButton = {
                 Button(

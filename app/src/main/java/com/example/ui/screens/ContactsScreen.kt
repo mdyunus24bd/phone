@@ -104,7 +104,6 @@ fun ContactsScreen(
     onCallContact: (String) -> Unit,
     onTogglePlayback: (CallRecordingEntity) -> Unit,
     onShareRecording: (CallRecordingEntity) -> Unit = {},
-    onReportSpam: (String) -> Unit,
     onDeleteLog: (Long) -> Unit,
     onImportDeviceContacts: () -> Unit,
     onOpenSettings: () -> Unit,
@@ -428,7 +427,6 @@ fun ContactsScreen(
             onAddContact = null,
             onTogglePlayback = onTogglePlayback,
             onShareRecording = onShareRecording,
-            onReportSpam = onReportSpam,
             onDeleteLog = onDeleteLog
         )
     }
