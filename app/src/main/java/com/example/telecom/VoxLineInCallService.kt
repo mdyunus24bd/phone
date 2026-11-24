@@ -3,6 +3,7 @@ package com.example.telecom
 import android.content.Context
 import android.content.Intent
 import android.os.Build
+import android.os.SystemClock
 import android.telecom.Call
 import android.telecom.CallAudioState
 import android.telecom.InCallService
@@ -12,10 +13,12 @@ import com.example.data.local.CallDirection
 import com.example.data.local.CallLogEntity
 import com.example.data.local.CallType
 import com.example.data.local.VoxLineDatabase
+import com.example.data.preferences.UserPreferencesRepository
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -109,7 +112,24 @@ object ActiveTelecomCallBus {
         }
     }
 
+    fun hasRingingCall(): Boolean = synchronized(lock) {
+        findRingingCallLocked() != null
+    }
+
+    @Suppress("DEPRECATION")
+    fun hasActiveNonRingingCall(excluding: Call? = null): Boolean = synchronized(lock) {
+        topLevelLiveCallsLocked().any { call ->
+            call !== excluding && (
+                call.state == Call.STATE_ACTIVE ||
+                    call.state == Call.STATE_DIALING ||
+                    call.state == Call.STATE_CONNECTING ||
+                    call.state == Call.STATE_HOLDING
+                )
+        }
+    }
+
     fun answer() {
+        IncomingCallRinger.stop()
         val target = synchronized(lock) {
             findRingingCallLocked() ?: findPrimaryCallLocked()
         } ?: return
@@ -117,6 +137,7 @@ object ActiveTelecomCallBus {
     }
 
     fun reject() {
+        IncomingCallRinger.stop()
         val target = synchronized(lock) {
             findRingingCallLocked() ?: findPrimaryCallLocked()
         } ?: return
@@ -128,6 +149,7 @@ object ActiveTelecomCallBus {
      * native Call.reject(rejectWithMessage = true, textMessage) Respond-Via-SMS API.
      */
     fun rejectWithMessage(message: String): Boolean {
+        IncomingCallRinger.stop()
         val call = synchronized(lock) {
             findRingingCallLocked() ?: findPrimaryCallLocked()
         } ?: return false
@@ -152,6 +174,7 @@ object ActiveTelecomCallBus {
     }
 
     fun disconnect() {
+        IncomingCallRinger.stop()
         val call = synchronized(lock) { findPrimaryCallLocked() } ?: return
         @Suppress("DEPRECATION")
         if (call.state == Call.STATE_RINGING) {
@@ -463,12 +486,15 @@ class VoxLineInCallService : InCallService() {
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val autoRejectedCalls = mutableSetOf<Call>()
+    private val userSilencedCalls = mutableSetOf<Call>()
+    private var lastSelfSilenceAtMs: Long = 0L
 
     private val callCallback = object : Call.Callback() {
         override fun onStateChanged(call: Call, state: Int) {
             if (call in autoRejectedCalls) return
             ActiveTelecomCallBus.updateCall(call)
             syncCallDisplayNotification(call, state)
+            syncIncomingRingtone(call, state)
         }
 
         override fun onDetailsChanged(call: Call, details: Call.Details) {
@@ -560,6 +586,7 @@ class VoxLineInCallService : InCallService() {
         call.registerCallback(callCallback)
         ActiveTelecomCallBus.attachCall(call)
         syncCallDisplayNotification(call, state)
+        syncIncomingRingtone(call, state)
 
         val launchIntent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or
@@ -568,6 +595,76 @@ class VoxLineInCallService : InCallService() {
             putExtra(IncomingCallNotificationManager.EXTRA_OPEN_ACTIVE_CALL, true)
         }
         runCatching { startActivity(launchIntent) }
+    }
+
+    private fun silenceSystemTelecomRinger() {
+        runCatching {
+            val telecom = getSystemService(Context.TELECOM_SERVICE) as? TelecomManager ?: return
+            if (telecom.defaultDialerPackage == packageName) {
+                lastSelfSilenceAtMs = SystemClock.elapsedRealtime()
+                @Suppress("DEPRECATION")
+                telecom.silenceRinger()
+            }
+        }
+    }
+
+    private fun syncIncomingRingtone(call: Call, state: Int) {
+        if (state == Call.STATE_RINGING) {
+            if (call in userSilencedCalls) return
+            // Do not blast a full ringtone during call-waiting while another call is already active
+            if (ActiveTelecomCallBus.hasActiveNonRingingCall(excluding = call)) return
+
+            val callKey = System.identityHashCode(call).toString()
+            silenceSystemTelecomRinger()
+
+            serviceScope.launch {
+                val ringtonePrefs = withContext(Dispatchers.IO) {
+                    runCatching {
+                        UserPreferencesRepository(applicationContext).getRingtonePreferencesSnapshot()
+                    }.getOrNull()
+                } ?: return@launch
+
+                @Suppress("DEPRECATION")
+                val stillRinging = call.state == Call.STATE_RINGING &&
+                    call !in autoRejectedCalls &&
+                    call !in userSilencedCalls &&
+                    !ActiveTelecomCallBus.hasActiveNonRingingCall(excluding = call)
+
+                if (stillRinging) {
+                    IncomingCallRinger.startIncomingRing(
+                        context = applicationContext,
+                        callKey = callKey,
+                        preferences = ringtonePrefs
+                    )
+                    // Second pass silence in case OEM Telecom started its system ringer asynchronously
+                    delay(200L)
+                    @Suppress("DEPRECATION")
+                    if (call.state == Call.STATE_RINGING && call !in userSilencedCalls) {
+                        silenceSystemTelecomRinger()
+                    }
+                }
+            }
+        } else {
+            userSilencedCalls.remove(call)
+            if (!ActiveTelecomCallBus.hasRingingCall()) {
+                IncomingCallRinger.stop()
+            }
+        }
+    }
+
+    override fun onSilenceRinger() {
+        super.onSilenceRinger()
+        // Ignore the callback echo triggered by our own silenceSystemTelecomRinger() call
+        if (SystemClock.elapsedRealtime() - lastSelfSilenceAtMs < 750L) {
+            return
+        }
+        calls?.forEach { call ->
+            @Suppress("DEPRECATION")
+            if (call.state == Call.STATE_RINGING) {
+                userSilencedCalls.add(call)
+            }
+        }
+        IncomingCallRinger.stop()
     }
 
     private fun rejectCallImmediately(call: Call) {
@@ -583,11 +680,15 @@ class VoxLineInCallService : InCallService() {
 
     override fun onCallRemoved(call: Call) {
         super.onCallRemoved(call)
+        userSilencedCalls.remove(call)
         if (autoRejectedCalls.remove(call)) {
             return
         }
         call.unregisterCallback(callCallback)
         ActiveTelecomCallBus.detachCall(call)
+        if (!ActiveTelecomCallBus.hasRingingCall()) {
+            IncomingCallRinger.stop()
+        }
         val remaining = ActiveTelecomCallBus.systemCall.value
         if (remaining == null) {
             IncomingCallNotificationManager.cancelCallNotification(this)
@@ -604,6 +705,8 @@ class VoxLineInCallService : InCallService() {
     override fun onDestroy() {
         serviceScope.cancel()
         autoRejectedCalls.clear()
+        userSilencedCalls.clear()
+        IncomingCallRinger.stop()
         IncomingCallNotificationManager.cancelCallNotification(this)
         ActiveTelecomCallBus.detachService(this)
         super.onDestroy()

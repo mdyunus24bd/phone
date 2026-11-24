@@ -18,7 +18,6 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.FiberManualRecord
-import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.PersonAddAlt1
 import androidx.compose.material.icons.filled.PhoneInTalk
 import androidx.compose.material.icons.filled.PlayArrow
@@ -28,7 +27,6 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -42,30 +40,23 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleEventObserver
-import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.example.data.local.CallRecordingEntity
 import com.example.data.local.ContactEntity
 import com.example.data.preferences.AutoRecordMode
 import com.example.data.preferences.VoxLineSettings
-import com.example.telecom.CallRecordingAccessibilityService
 import com.example.ui.components.formatDuration
 import com.example.ui.components.formatTimestamp
 import com.example.ui.theme.CallEndRed
 import com.example.ui.theme.MonoMetricStyle
-import com.example.ui.theme.QualityFair
 import com.example.ui.theme.SimAccentEmerald
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -85,105 +76,13 @@ fun CallRecordingSection(
     onShareRecording: (CallRecordingEntity) -> Unit = {},
     onDeleteRecording: (CallRecordingEntity) -> Unit
 ) {
-    val context = LocalContext.current
-    val lifecycleOwner = LocalLifecycleOwner.current
     var numberInput by remember { mutableStateOf("") }
-    var isAudioHelperEnabled by remember {
-        mutableStateOf(CallRecordingAccessibilityService.isServiceEnabled(context))
-    }
-
-    DisposableEffect(lifecycleOwner, context) {
-        val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME) {
-                isAudioHelperEnabled = CallRecordingAccessibilityService.isServiceEnabled(context)
-            }
-        }
-        lifecycleOwner.lifecycle.addObserver(observer)
-        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
-    }
 
     val sortedNumbers = remember(settings.autoRecordNumbers) {
         settings.autoRecordNumbers.sorted()
     }
 
     Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
-        // Android 10+ Two-Way Call Audio Helper Card (prevents Android from silencing call recordings)
-        Card(
-            shape = RoundedCornerShape(18.dp),
-            colors = CardDefaults.cardColors(
-                containerColor = if (isAudioHelperEnabled) {
-                    SimAccentEmerald.copy(alpha = 0.10f)
-                } else {
-                    QualityFair.copy(alpha = 0.12f)
-                }
-            ),
-            border = BorderStroke(
-                1.dp,
-                if (isAudioHelperEnabled) SimAccentEmerald.copy(alpha = 0.45f) else QualityFair.copy(alpha = 0.5f)
-            ),
-            modifier = Modifier
-                .fillMaxWidth()
-                .testTag("call_audio_helper_card")
-        ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(14.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    Surface(
-                        shape = RoundedCornerShape(12.dp),
-                        color = (if (isAudioHelperEnabled) SimAccentEmerald else QualityFair).copy(alpha = 0.18f),
-                        modifier = Modifier.size(40.dp)
-                    ) {
-                        Icon(
-                            imageVector = if (isAudioHelperEnabled) Icons.Filled.Check else Icons.Filled.GraphicEq,
-                            contentDescription = "Two-Way Call Audio Helper",
-                            tint = if (isAudioHelperEnabled) SimAccentEmerald else QualityFair,
-                            modifier = Modifier.padding(9.dp)
-                        )
-                    }
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = if (isAudioHelperEnabled) {
-                                "Two-Way Call Audio Helper Active"
-                            } else {
-                                "Enable Two-Way Call Audio Helper"
-                            },
-                            style = MaterialTheme.typography.titleSmall,
-                            color = MaterialTheme.colorScheme.onSurface
-                        )
-                        Text(
-                            text = if (isAudioHelperEnabled) {
-                                "Android 10+ audio sharing is enabled so call recordings capture clear two-way voice instead of silence."
-                            } else {
-                                "Android 10+ silences ordinary apps during SIM calls. Enable 'VoxLine Call Audio Helper' in Accessibility Settings to capture both sides."
-                            },
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                }
-                if (!isAudioHelperEnabled) {
-                    FilledTonalButton(
-                        onClick = {
-                            CallRecordingAccessibilityService.openAccessibilitySettings(context)
-                        },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .testTag("open_accessibility_call_audio_helper")
-                    ) {
-                        Text("Open Accessibility Settings")
-                    }
-                }
-            }
-        }
-
         // Master Automatic Call Recording Toggle + Mode Selector
         Card(
             shape = RoundedCornerShape(18.dp),

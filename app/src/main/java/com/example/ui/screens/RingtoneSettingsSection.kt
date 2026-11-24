@@ -206,15 +206,40 @@ fun RingtoneSettingsSection(
             }
         }
 
+        val displayedRingtones = if (
+            activeUri.isNotBlank() && availableRingtones.none { it.uri == activeUri }
+        ) {
+            val source = if (activeUri.startsWith("file://")) {
+                RingtoneSource.CUSTOM
+            } else {
+                RingtoneSource.SYSTEM
+            }
+            val subtitle = if (source == RingtoneSource.CUSTOM) {
+                "Selected custom audio file"
+            } else {
+                "Selected from system ringtone picker"
+            }
+            listOf(
+                RingtoneOption(
+                    uri = activeUri,
+                    title = activeTitle,
+                    subtitle = subtitle,
+                    source = source
+                )
+            ) + availableRingtones
+        } else {
+            availableRingtones
+        }
+
         // Built-In & Device Ringtone Catalog
         Text(
-            text = "Choose SIM Ringtone (${availableRingtones.size})",
+            text = "Choose Incoming Call Ringtone (${displayedRingtones.size})",
             style = MaterialTheme.typography.titleSmall,
             color = activeAccent
         )
 
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            availableRingtones.forEach { option ->
+            displayedRingtones.forEach { option ->
                 val isSelected = activeUri == option.uri
                 val isPreviewing = previewingUri == option.uri
                 Surface(

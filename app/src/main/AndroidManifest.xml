@@ -111,20 +111,6 @@
             android:exported="false"
             android:foregroundServiceType="microphone" />
 
-        <!-- Optional Android 10+ Call Audio Helper allowing non-silenced VOICE_RECOGNITION call capture -->
-        <service
-            android:name=".telecom.CallRecordingAccessibilityService"
-            android:exported="true"
-            android:label="@string/accessibility_call_audio_label"
-            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
-            <intent-filter>
-                <action android:name="android.accessibilityservice.AccessibilityService" />
-            </intent-filter>
-            <meta-data
-                android:name="android.accessibilityservice"
-                android:resource="@xml/call_recording_accessibility_config" />
-        </service>
-
         <!-- Handles Answer, Decline, and Hang Up actions from over-display CallStyle notifications -->
         <receiver
             android:name=".telecom.IncomingCallActionReceiver"

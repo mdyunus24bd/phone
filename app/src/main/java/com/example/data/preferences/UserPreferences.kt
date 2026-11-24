@@ -13,6 +13,7 @@ import androidx.datastore.preferences.preferencesDataStore
 import com.example.ui.theme.AccentPalette
 import com.example.ui.theme.ThemeMode
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import org.json.JSONArray
 
@@ -284,6 +285,15 @@ class UserPreferencesRepository(private val context: Context) {
             it[Keys.CALL_FORWARDING_CONDITION] = CallForwardingCondition.ALWAYS.name
             it[Keys.CALL_FORWARDING_UPDATED_AT] = System.currentTimeMillis()
         }
+    }
+
+    suspend fun getRingtonePreferencesSnapshot(): RingtonePreferences {
+        val prefs = context.voxLineDataStore.data.first()
+        return RingtonePreferences(
+            simRingtoneUri = prefs[Keys.SIM_RINGTONE_URI] ?: "builtin:sim_classic",
+            simRingtoneTitle = prefs[Keys.SIM_RINGTONE_TITLE] ?: "Classic Horizon",
+            vibrateOnSimRing = prefs[Keys.VIBRATE_SIM_RING] ?: true
+        )
     }
 
     suspend fun setSimRingtone(uri: String, title: String) {

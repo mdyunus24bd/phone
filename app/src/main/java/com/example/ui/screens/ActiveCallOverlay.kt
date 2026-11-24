@@ -109,7 +109,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.R
 import com.example.data.local.ContactEntity
-import com.example.telecom.CallRecordingAccessibilityService
 import com.example.telecom.PhoneCountryResolver
 import com.example.telecom.SpamRiskLevel
 import com.example.telecom.extractSimCompanyName
@@ -176,11 +175,8 @@ fun ActiveCallOverlay(
     var hasRequestedMicOnce by remember { mutableStateOf(false) }
     var showMicRationaleDialog by remember { mutableStateOf(false) }
     var showMicSettingsDialog by remember { mutableStateOf(false) }
-    var isAudioHelperEnabled by remember {
-        mutableStateOf(CallRecordingAccessibilityService.isServiceEnabled(context))
-    }
 
-    // Refresh microphone permission & Call Audio Helper state when returning from Android Settings
+    // Refresh microphone permission when returning from Android App Settings
     DisposableEffect(lifecycleOwner, context) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
@@ -188,12 +184,6 @@ fun ActiveCallOverlay(
                     context,
                     Manifest.permission.RECORD_AUDIO
                 ) == PackageManager.PERMISSION_GRANTED
-                val wasHelperEnabled = isAudioHelperEnabled
-                val nowHelperEnabled = CallRecordingAccessibilityService.isServiceEnabled(context)
-                isAudioHelperEnabled = nowHelperEnabled
-                if (!wasHelperEnabled && nowHelperEnabled && session.isRecording && session.isRecordingSilenced) {
-                    onRetryRecord()
-                }
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -1062,6 +1052,51 @@ fun ActiveCallOverlay(
                                         },
                                         modifier = Modifier.weight(1f)
                                     )
+                                }
+                            }
+                        }
+
+                        if (session.isRecording && session.isRecordingSilenced) {
+                            Surface(
+                                shape = RoundedCornerShape(14.dp),
+                                color = QualityFair.copy(alpha = 0.14f),
+                                border = BorderStroke(1.dp, QualityFair.copy(alpha = 0.45f)),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("recording_silenced_tip_banner")
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Text(
+                                        text = if (session.isSpeakerOn) {
+                                            "Audio input is quiet or restricted by system policy."
+                                        } else {
+                                            "Turn on Speaker for clearer recording of both sides."
+                                        },
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = Color(0xFFE2E8F0),
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    TextButton(
+                                        onClick = {
+                                            if (!session.isSpeakerOn) {
+                                                onToggleSpeaker()
+                                            }
+                                            onRetryRecord()
+                                        },
+                                        modifier = Modifier.testTag("recording_silenced_retry_button")
+                                    ) {
+                                        Text(
+                                            text = if (session.isSpeakerOn) "Retry" else "Speaker",
+                                            color = QualityFair,
+                                            style = MaterialTheme.typography.labelLarge
+                                        )
+                                    }
                                 }
                             }
                         }

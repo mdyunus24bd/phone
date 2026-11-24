@@ -423,7 +423,7 @@ private fun VoxLineRootApp(
                 @Suppress("DEPRECATION")
                 result.data?.getParcelableExtra(RingtoneManager.EXTRA_RINGTONE_PICKED_URI)
             }
-            viewModel.applyPickedRingtoneUri(pickedUri)
+            viewModel.applyPickedRingtoneUri(pickedUri = pickedUri, isCustomAudio = false)
         }
     }
 
@@ -438,20 +438,20 @@ private fun VoxLineRootApp(
                     Intent.FLAG_GRANT_READ_URI_PERMISSION
                 )
             }
-            viewModel.applyPickedRingtoneUri(uri)
+            viewModel.applyPickedRingtoneUri(pickedUri = uri, isCustomAudio = true)
         }
     }
 
     val openSystemRingtonePicker: () -> Unit = {
         val pickerIntent = viewModel.ringtoneEngine.createSystemRingtonePickerIntent(
             currentUri = settings.ringtones.simRingtoneUri,
-            title = "Select SIM Cellular Ringtone"
+            title = "Select Incoming Call Ringtone"
         )
-        systemRingtonePickerLauncher.launch(pickerIntent)
+        runCatching { systemRingtonePickerLauncher.launch(pickerIntent) }
     }
 
     val openCustomAudioPicker: () -> Unit = {
-        customAudioRingtoneLauncher.launch(arrayOf("audio/*"))
+        runCatching { customAudioRingtoneLauncher.launch(arrayOf("audio/*")) }
     }
 
     val openSettingsAtTab: (ControlTab) -> Unit = { tab ->

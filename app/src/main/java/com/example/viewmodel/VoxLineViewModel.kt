@@ -42,6 +42,7 @@ import com.example.telecom.ActiveTelecomCallBus
 import com.example.telecom.CallRecordingManager
 import com.example.telecom.CallRecordingState
 import com.example.telecom.ConferenceParticipantSnapshot
+import com.example.telecom.IncomingCallRinger
 import com.example.telecom.NetworkQualityEngine
 import com.example.telecom.NetworkQualitySample
 import com.example.telecom.RingtoneEngine
@@ -54,6 +55,7 @@ import com.example.telecom.SpamRiskLevel
 import com.example.telecom.TelecomBridge
 import com.example.ui.theme.AccentPalette
 import com.example.ui.theme.ThemeMode
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -67,6 +69,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 
 data class ActiveCallSession(
     val address: String,
@@ -119,7 +122,7 @@ class VoxLineViewModel(application: Application) : AndroidViewModel(application)
 
     val settings: StateFlow<VoxLineSettings> = repository.settingsFlow.stateIn(
         viewModelScope,
-        SharingStarted.WhileSubscribed(5000L),
+        SharingStarted.Eagerly,
         VoxLineSettings()
     )
 
@@ -360,15 +363,10 @@ class VoxLineViewModel(application: Application) : AndroidViewModel(application)
                             canMergeCalls = sysCall.canMergeCalls,
                             canSwapCalls = sysCall.canSwapCalls
                         )
-                        if (sysCall.isRinging) {
-                            val rt = settings.value.ringtones
-                            ringtoneEngine.playPreviewOrRing(
-                                uriString = rt.simRingtoneUri,
-                                looping = true,
-                                vibrate = rt.vibrateOnSimRing
-                            )
-                        } else {
-                            ringtoneEngine.stop()
+                        // Stop any Settings ringtone preview; VoxLineInCallService owns IncomingCallRinger
+                        stopRingtonePreview()
+                        if (!sysCall.isRinging) {
+                            IncomingCallRinger.stop()
                             if (sysCall.isConnected) {
                                 tryStartAutoRecordingIfEligible(sysCall.handle)
                                 startCallTelemetryLoops()
@@ -399,7 +397,8 @@ class VoxLineViewModel(application: Application) : AndroidViewModel(application)
                             )
                         }
                         if (!sysCall.isRinging) {
-                            ringtoneEngine.stop()
+                            stopRingtonePreview()
+                            IncomingCallRinger.stop()
                         }
                         if (justConnected || (sysCall.isConnected && callTimerJob == null)) {
                             tryStartAutoRecordingIfEligible(sysCall.handle)
@@ -407,7 +406,8 @@ class VoxLineViewModel(application: Application) : AndroidViewModel(application)
                         }
                     }
                 } else if (_activeCall.value?.isSystemTelecomCall == true) {
-                    ringtoneEngine.stop()
+                    stopRingtonePreview()
+                    IncomingCallRinger.stop()
                     finalizeActiveCall()
                 }
             }
@@ -720,7 +720,8 @@ class VoxLineViewModel(application: Application) : AndroidViewModel(application)
 
     fun answerIncomingCall() {
         val current = _activeCall.value ?: return
-        ringtoneEngine.stop()
+        stopRingtonePreview()
+        IncomingCallRinger.stop()
         if (current.isSystemTelecomCall) {
             ActiveTelecomCallBus.answer()
         }
@@ -728,7 +729,8 @@ class VoxLineViewModel(application: Application) : AndroidViewModel(application)
 
     fun declineIncomingCall() {
         val current = _activeCall.value ?: return
-        ringtoneEngine.stop()
+        stopRingtonePreview()
+        IncomingCallRinger.stop()
         if (current.isSystemTelecomCall) {
             ActiveTelecomCallBus.reject()
         } else {
@@ -748,7 +750,8 @@ class VoxLineViewModel(application: Application) : AndroidViewModel(application)
             showMessage("Enter or choose a quick reply message first.")
             return
         }
-        ringtoneEngine.stop()
+        stopRingtonePreview()
+        IncomingCallRinger.stop()
         if (current.isSystemTelecomCall) {
             val handledNatively = ActiveTelecomCallBus.rejectWithMessage(cleanMsg)
             if (handledNatively) {
@@ -1579,9 +1582,9 @@ class VoxLineViewModel(application: Application) : AndroidViewModel(application)
     fun selectSimRingtone(uri: String, title: String, playPreview: Boolean = true) {
         viewModelScope.launch {
             prefsRepo.setSimRingtone(uri, title)
-            showMessage("SIM ringtone set to $title")
+            showMessage("Incoming call ringtone set to $title")
             if (playPreview) {
-                toggleRingtonePreview(
+                startRingtonePreview(
                     uri = uri,
                     vibrate = settings.value.ringtones.vibrateOnSimRing
                 )
@@ -1589,28 +1592,53 @@ class VoxLineViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
-    fun applyPickedRingtoneUri(pickedUri: Uri?) {
-        val uriString = pickedUri?.toString() ?: "silent"
-        val title = ringtoneEngine.resolveTitleForUri(pickedUri)
-        selectSimRingtone(uri = uriString, title = title, playPreview = true)
+    fun applyPickedRingtoneUri(pickedUri: Uri?, isCustomAudio: Boolean = false) {
+        viewModelScope.launch {
+            if (pickedUri == null) {
+                selectSimRingtone(uri = "silent", title = "Silent (No Sound)", playPreview = false)
+                return@launch
+            }
+            val (persistedUri, title) = withContext(Dispatchers.IO) {
+                val resolvedTitle = ringtoneEngine.resolveTitleForUri(pickedUri)
+                val storedUri = ringtoneEngine.persistRingtoneUriIfNeeded(
+                    sourceUri = pickedUri,
+                    forceCopy = isCustomAudio
+                )
+                storedUri to resolvedTitle
+            }
+            prefsRepo.setSimRingtone(persistedUri, title)
+            showMessage("Incoming call ringtone set to $title")
+            startRingtonePreview(
+                uri = persistedUri,
+                vibrate = settings.value.ringtones.vibrateOnSimRing
+            )
+        }
     }
 
-    fun toggleRingtonePreview(uri: String, vibrate: Boolean = false) {
-        if (_previewingRingtoneUri.value == uri) {
-            ringtoneEngine.stop()
-            _previewingRingtoneUri.value = null
+    private fun startRingtonePreview(uri: String, vibrate: Boolean) {
+        if (uri == "silent" || uri.isBlank()) {
+            stopRingtonePreview()
             return
         }
         _previewingRingtoneUri.value = uri
         ringtoneEngine.playPreviewOrRing(
             uriString = uri,
             looping = false,
-            vibrate = vibrate
+            vibrate = vibrate,
+            respectRingerMode = false
         ) {
             if (_previewingRingtoneUri.value == uri) {
                 _previewingRingtoneUri.value = null
             }
         }
+    }
+
+    fun toggleRingtonePreview(uri: String, vibrate: Boolean = false) {
+        if (_previewingRingtoneUri.value == uri) {
+            stopRingtonePreview()
+            return
+        }
+        startRingtonePreview(uri = uri, vibrate = vibrate)
     }
 
     fun stopRingtonePreview() {
@@ -1625,7 +1653,7 @@ class VoxLineViewModel(application: Application) : AndroidViewModel(application)
     fun resetRingtonesToDefault() = viewModelScope.launch {
         stopRingtonePreview()
         prefsRepo.resetRingtonesToDefault()
-        showMessage("SIM ringtone restored to default.")
+        showMessage("Incoming call ringtone restored to default.")
     }
 
     fun setSpamShield(enabled: Boolean) = viewModelScope.launch { prefsRepo.setSpamShieldEnabled(enabled) }

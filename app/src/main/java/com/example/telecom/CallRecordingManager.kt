@@ -126,14 +126,6 @@ class CallRecordingManager(
         ) == PackageManager.PERMISSION_GRANTED
     }
 
-    fun isCallAudioHelperEnabled(): Boolean {
-        return CallRecordingAccessibilityService.isServiceEnabled(context)
-    }
-
-    fun openCallAudioHelperSettings(): Boolean {
-        return CallRecordingAccessibilityService.openAccessibilitySettings(context)
-    }
-
     /**
      * Private app internal storage directory where call recordings are persisted.
      */
@@ -261,8 +253,7 @@ class CallRecordingManager(
      */
     @SuppressLint("MissingPermission")
     private fun probeAndOpenBestAudioSource(): OpenedCaptureSession? {
-        val helperEnabled = isCallAudioHelperEnabled()
-        val candidates = buildCandidateSources(helperEnabled)
+        val candidates = buildCandidateSources()
 
         var bestFallbackSpec: Triple<Int, String, Int>? = null
         var bestFallbackPriority = Int.MAX_VALUE
@@ -293,8 +284,8 @@ class CallRecordingManager(
         }
 
         // Fallback: no candidate produced non-zero signal during the brief probe (e.g., quiet room
-        // or Android 10+ silencing all non-a11y apps during MODE_IN_CALL). Re-open best fallback
-        // (preferring VOICE_RECOGNITION / MIC) so recording still runs and can auto-recover mid-call.
+        // or OS call-audio restriction). Re-open best fallback (preferring VOICE_RECOGNITION / MIC)
+        // so recording still runs and can auto-recover mid-call (e.g., when Speaker is enabled).
         val fallback = bestFallbackSpec ?: return null
         return openAudioRecordDirect(
             source = fallback.first,
@@ -303,46 +294,31 @@ class CallRecordingManager(
         )
     }
 
-    private fun buildCandidateSources(helperEnabled: Boolean): List<AudioSourceCandidate> {
+    private fun buildCandidateSources(): List<AudioSourceCandidate> {
         val list = mutableListOf<AudioSourceCandidate>()
-        // 1. Direct two-way telephony bus (works natively on OEM ROMs that expose it)
+        // 1. Direct telephony bus (works natively on OEM ROMs that expose it)
         list += AudioSourceCandidate(
             source = MediaRecorder.AudioSource.VOICE_CALL,
             label = "VOICE_CALL",
             preferredRates = listOf(16_000, 8_000, 44_100, 48_000)
         )
-        // 2. VOICE_RECOGNITION: primary Android 10–15 non-privacy-sensitive two-way capture source
-        //    (explicitly permitted during MODE_IN_CALL when Call Audio Helper is active, and avoids
-        //    aggressive VoIP echo cancellation that erases the remote caller)
+        // 2. VOICE_RECOGNITION: avoids aggressive VoIP echo cancellation that attenuates far-end voice
         list += AudioSourceCandidate(
             source = MediaRecorder.AudioSource.VOICE_RECOGNITION,
             label = "VOICE_RECOG",
             preferredRates = listOf(16_000, 44_100, 48_000, 8_000)
         )
-        if (!helperEnabled) {
-            // 3. Raw MIC with setPrivacySensitive(false) often succeeds on OEMs that block VOICE_COMM
-            list += AudioSourceCandidate(
-                source = MediaRecorder.AudioSource.MIC,
-                label = "MIC",
-                preferredRates = listOf(44_100, 16_000, 48_000)
-            )
-            list += AudioSourceCandidate(
-                source = MediaRecorder.AudioSource.VOICE_COMMUNICATION,
-                label = "VOICE_COMM",
-                preferredRates = listOf(16_000, 44_100, 48_000)
-            )
-        } else {
-            list += AudioSourceCandidate(
-                source = MediaRecorder.AudioSource.VOICE_COMMUNICATION,
-                label = "VOICE_COMM",
-                preferredRates = listOf(16_000, 44_100, 48_000)
-            )
-            list += AudioSourceCandidate(
-                source = MediaRecorder.AudioSource.MIC,
-                label = "MIC",
-                preferredRates = listOf(44_100, 16_000, 48_000)
-            )
-        }
+        // 3. Raw MIC with setPrivacySensitive(false) often succeeds on OEMs that block VOICE_COMM
+        list += AudioSourceCandidate(
+            source = MediaRecorder.AudioSource.MIC,
+            label = "MIC",
+            preferredRates = listOf(44_100, 16_000, 48_000)
+        )
+        list += AudioSourceCandidate(
+            source = MediaRecorder.AudioSource.VOICE_COMMUNICATION,
+            label = "VOICE_COMM",
+            preferredRates = listOf(16_000, 44_100, 48_000)
+        )
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             list += AudioSourceCandidate(
                 source = MediaRecorder.AudioSource.UNPROCESSED,
