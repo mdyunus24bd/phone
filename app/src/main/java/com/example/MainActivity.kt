@@ -552,6 +552,7 @@ private fun VoxLineRootApp(
                                 onCallContact = { addr ->
                                     viewModel.startCall(addr)
                                 },
+                                onCopyPhoneNumber = viewModel::copyPhoneNumber,
                                 onToggleFavorite = viewModel::toggleFavoriteContact,
                                 onTogglePlayback = viewModel::togglePlayback,
                                 onShareRecording = viewModel::shareRecording,
@@ -612,6 +613,8 @@ private fun VoxLineRootApp(
                                 onCallContact = { addr ->
                                     viewModel.startCall(addr)
                                 },
+                                onCopyPhoneNumber = viewModel::copyPhoneNumber,
+                                onShareContact = viewModel::shareContact,
                                 onTogglePlayback = viewModel::togglePlayback,
                                 onShareRecording = viewModel::shareRecording,
                                 onDeleteLog = viewModel::deleteCallLog,

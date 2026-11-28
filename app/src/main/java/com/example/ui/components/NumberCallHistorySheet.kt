@@ -1,7 +1,10 @@
 package com.example.ui.components
 
+import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -64,9 +67,12 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
@@ -125,7 +131,7 @@ fun matchesCallHistoryTarget(
  * Shows every incoming, outgoing, missed, and blocked call along with duration,
  * exact timestamp, SIM line, quality MOS, recordings, and instant actions.
  */
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun NumberCallHistoryDialog(
     phoneNumber: String,
@@ -143,10 +149,18 @@ fun NumberCallHistoryDialog(
 ) {
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
+    val haptics = LocalHapticFeedback.current
     val displayName = matchedContact?.displayName?.ifBlank { phoneNumber }
         ?: allLogsForNumber.firstOrNull()?.resolvedContactName?.ifBlank { phoneNumber }
         ?: phoneNumber
     val simNumber = matchedContact?.phoneNumber?.ifBlank { phoneNumber } ?: phoneNumber
+    val copyNumberToClipboard: () -> Unit = {
+        val toCopy = simNumber.ifBlank { phoneNumber }.trim()
+        if (toCopy.isNotBlank()) {
+            clipboard.setText(AnnotatedString(toCopy))
+            Toast.makeText(context, "Copied $toCopy", Toast.LENGTH_SHORT).show()
+        }
+    }
     val callingCountry = remember(simNumber, phoneNumber) {
         PhoneCountryResolver.resolveCountryName(context, simNumber.ifBlank { phoneNumber })
     }
@@ -215,10 +229,7 @@ fun NumberCallHistoryDialog(
                     },
                     actions = {
                         IconButton(
-                            onClick = {
-                                val toCopy = simNumber.ifBlank { phoneNumber }
-                                clipboard.setText(AnnotatedString(toCopy))
-                            }
+                            onClick = { copyNumberToClipboard() }
                         ) {
                             Icon(
                                 imageVector = Icons.Filled.ContentCopy,
@@ -271,13 +282,41 @@ fun NumberCallHistoryDialog(
                                         style = MaterialTheme.typography.headlineSmall,
                                         fontWeight = FontWeight.Bold,
                                         maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = if (simNumber.isNotBlank() && simNumber == displayName) {
+                                            Modifier
+                                                .clip(RoundedCornerShape(8.dp))
+                                                .combinedClickable(
+                                                    onClick = {},
+                                                    onLongClick = {
+                                                        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                                        copyNumberToClipboard()
+                                                    },
+                                                    onLongClickLabel = "Copy phone number"
+                                                )
+                                                .padding(horizontal = 8.dp, vertical = 2.dp)
+                                                .testTag("history_phone_number")
+                                        } else {
+                                            Modifier
+                                        }
                                     )
                                     if (simNumber.isNotBlank() && simNumber != displayName) {
                                         Text(
                                             text = simNumber,
                                             style = MonoMetricStyle,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            modifier = Modifier
+                                                .clip(RoundedCornerShape(8.dp))
+                                                .combinedClickable(
+                                                    onClick = {},
+                                                    onLongClick = {
+                                                        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                                        copyNumberToClipboard()
+                                                    },
+                                                    onLongClickLabel = "Copy phone number"
+                                                )
+                                                .padding(horizontal = 8.dp, vertical = 2.dp)
+                                                .testTag("history_phone_number")
                                         )
                                     }
                                     if (callingCountry.isNotBlank()) {

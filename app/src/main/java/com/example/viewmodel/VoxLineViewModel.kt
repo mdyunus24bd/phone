@@ -2,6 +2,8 @@ package com.example.viewmodel
 
 import android.Manifest
 import android.app.Application
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -1218,6 +1220,44 @@ class VoxLineViewModel(application: Application) : AndroidViewModel(application)
             if (!launched) {
                 showMessage("No app available to share this recording.")
             }
+        }
+    }
+
+    fun copyPhoneNumber(phoneNumber: String) {
+        val clean = phoneNumber.trim()
+        if (clean.isEmpty()) return
+        val app = getApplication<Application>()
+        val clipboard = app.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+        clipboard?.setPrimaryClip(ClipData.newPlainText("Phone Number", clean))
+        showMessage("Copied $clean")
+    }
+
+    fun shareContact(contact: ContactEntity) {
+        val name = contact.displayName.trim()
+        val number = contact.phoneNumber.trim()
+        val shareText = when {
+            name.isNotBlank() && number.isNotBlank() -> "$name\n$number"
+            number.isNotBlank() -> number
+            name.isNotBlank() -> name
+            else -> return
+        }
+        val app = getApplication<Application>()
+        val launched = runCatching {
+            val sendIntent = Intent(Intent.ACTION_SEND).apply {
+                type = "text/plain"
+                if (name.isNotBlank()) {
+                    putExtra(Intent.EXTRA_SUBJECT, name)
+                }
+                putExtra(Intent.EXTRA_TEXT, shareText)
+            }
+            val chooser = Intent.createChooser(sendIntent, "Share Contact").apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            app.startActivity(chooser)
+            true
+        }.getOrDefault(false)
+        if (!launched) {
+            showMessage("No app available to share this contact.")
         }
     }
 
