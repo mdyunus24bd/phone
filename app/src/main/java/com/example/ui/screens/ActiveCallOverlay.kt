@@ -370,7 +370,7 @@ fun ActiveCallOverlay(
                         overflow = TextOverflow.Ellipsis
                     )
 
-                    if (session.displayName.isNotBlank()) {
+                    if (session.displayName.isNotBlank() && session.displayName != session.address) {
                         Text(
                             text = session.address,
                             style = MonoMetricStyle,
@@ -619,7 +619,7 @@ fun ActiveCallOverlay(
                             }
                         }
                     } else {
-                        if (session.displayName.isNotBlank()) {
+                        if (session.displayName.isNotBlank() && session.displayName != session.address) {
                             Text(
                                 text = session.address,
                                 style = MonoMetricStyle,
@@ -1074,9 +1074,9 @@ fun ActiveCallOverlay(
                                 ) {
                                     Text(
                                         text = if (session.isSpeakerOn) {
-                                            "Audio input is quiet or restricted by system policy."
+                                            "Android OS is silencing third-party call audio capture on this device during SIM calls."
                                         } else {
-                                            "Turn on Speaker for clearer recording of both sides."
+                                            "Android is silencing call capture on this device. Try Speaker to re-probe if supported."
                                         },
                                         style = MaterialTheme.typography.bodySmall,
                                         color = Color(0xFFE2E8F0),

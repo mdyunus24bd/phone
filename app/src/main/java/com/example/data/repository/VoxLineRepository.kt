@@ -481,7 +481,29 @@ class VoxLineRepository(
 
     suspend fun deleteContact(contact: ContactEntity) = db.contactDao().delete(contact)
 
-    suspend fun findContactByAddress(address: String): ContactEntity? = db.contactDao().findByAddress(address)
+    suspend fun findContactByAddress(address: String): ContactEntity? = withContext(Dispatchers.IO) {
+        val cleaned = com.example.telecom.CallerContactResolver.cleanNumber(address)
+        if (!com.example.telecom.CallerContactResolver.isUsableNumber(cleaned)) return@withContext null
+
+        val allContacts = db.contactDao().getAllSnapshot()
+        val roomMatch = com.example.telecom.CallerContactResolver.findMatchingContact(cleaned, allContacts)
+        val systemMatch = com.example.telecom.CallerContactResolver.lookupSystemContact(context, cleaned)
+
+        when {
+            roomMatch != null && systemMatch != null -> roomMatch.copy(
+                displayName = systemMatch.displayName.ifBlank { roomMatch.displayName },
+                photoUri = systemMatch.photoUri.ifBlank { roomMatch.photoUri }
+            )
+            roomMatch != null -> roomMatch
+            systemMatch != null && systemMatch.displayName.isNotBlank() -> ContactEntity(
+                displayName = systemMatch.displayName,
+                phoneNumber = cleaned,
+                label = "Device",
+                photoUri = systemMatch.photoUri
+            )
+            else -> null
+        }
+    }
 
     fun observeCallLogsByType(callType: CallType): Flow<List<CallLogEntity>> =
         db.callHistoryDao().observeByCallType(callType)
@@ -704,7 +726,8 @@ class VoxLineRepository(
                 .associateBy { "${it.phoneNumber}:${it.timestamp}" }
             val existingKeys = existingByKey.keys.toMutableSet()
 
-            val contactsByDigits = db.contactDao().getAllSnapshot()
+            val allRoomContacts = db.contactDao().getAllSnapshot()
+            val contactsByDigits = allRoomContacts
                 .mapNotNull { c ->
                     val d = c.phoneNumber.filter { it.isDigit() }
                     if (d.isNotEmpty()) d to c else null
@@ -762,7 +785,7 @@ class VoxLineRepository(
                         }
                         val digits = number.filter { it.isDigit() }
                         val matchedContact = contactsByDigits[digits]
-                            ?: db.contactDao().findByAddress(number)
+                            ?: com.example.telecom.CallerContactResolver.findMatchingContact(number, allRoomContacts)
                         val resolvedName = matchedContact?.displayName?.ifBlank { cachedName } ?: cachedName
                         imported.add(
                             CallLogEntity(

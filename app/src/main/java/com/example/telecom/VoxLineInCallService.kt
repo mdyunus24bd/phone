@@ -44,6 +44,8 @@ data class SecondaryCallSnapshot(
 
 data class SystemTelecomCallSnapshot(
     val handle: String,
+    val callerDisplayName: String = "",
+    val callerPhotoUri: String = "",
     val state: Int,
     val isRinging: Boolean,
     val isDialing: Boolean,
@@ -73,6 +75,7 @@ object ActiveTelecomCallBus {
 
     private val lock = Any()
     private val trackedCalls = mutableListOf<Call>()
+    private val resolvedCallerByHandle = mutableMapOf<String, ResolvedCallerInfo>()
 
     @Volatile
     private var activeService: VoxLineInCallService? = null
@@ -110,6 +113,38 @@ object ActiveTelecomCallBus {
             trackedCalls.remove(call)
             emitSnapshotLocked()
         }
+    }
+
+    fun cacheResolvedCaller(handle: String, info: ResolvedCallerInfo) {
+        if (!CallerContactResolver.isUsableNumber(handle) || info.displayName.isBlank()) return
+        val key = normalizeCacheKey(handle)
+        synchronized(lock) {
+            resolvedCallerByHandle[key] = info
+            if (trackedCalls.isNotEmpty()) {
+                emitSnapshotLocked()
+            }
+        }
+    }
+
+    fun getCachedCaller(handle: String): ResolvedCallerInfo? {
+        if (!CallerContactResolver.isUsableNumber(handle)) return null
+        val key = normalizeCacheKey(handle)
+        return synchronized(lock) {
+            getCachedCallerLocked(handle, key)
+        }
+    }
+
+    private fun normalizeCacheKey(handle: String): String {
+        val cleaned = CallerContactResolver.cleanNumber(handle)
+        val digits = cleaned.filter { it.isDigit() }
+        return digits.ifEmpty { cleaned }
+    }
+
+    private fun getCachedCallerLocked(handle: String, key: String = normalizeCacheKey(handle)): ResolvedCallerInfo? {
+        resolvedCallerByHandle[key]?.let { return it }
+        return resolvedCallerByHandle.entries.firstOrNull { (cachedKey, _) ->
+            CallerContactResolver.phoneNumbersMatch(cachedKey, handle)
+        }?.value
     }
 
     fun hasRingingCall(): Boolean = synchronized(lock) {
@@ -324,16 +359,32 @@ object ActiveTelecomCallBus {
         return hasProp || call.children.isNotEmpty()
     }
 
-    private fun resolveDisplayName(call: Call): String {
+    private fun resolveTelecomDisplayName(call: Call): String {
+        val rawHandle = call.details?.handle?.schemeSpecificPart.orEmpty()
         val contactName = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            call.details?.contactDisplayName.orEmpty()
+            call.details?.contactDisplayName?.trim().orEmpty()
         } else {
             ""
         }
-        if (contactName.isNotBlank()) return contactName
-        val callerDisplay = call.details?.callerDisplayName.orEmpty()
-        if (callerDisplay.isNotBlank()) return callerDisplay
-        return call.details?.handle?.schemeSpecificPart.orEmpty()
+        if (contactName.isNotBlank() && !CallerContactResolver.isLikelyPhoneNumber(contactName, rawHandle)) {
+            return contactName
+        }
+        val callerDisplay = call.details?.callerDisplayName?.trim().orEmpty()
+        if (callerDisplay.isNotBlank() && !CallerContactResolver.isLikelyPhoneNumber(callerDisplay, rawHandle)) {
+            return callerDisplay
+        }
+        return ""
+    }
+
+    private fun resolveDisplayNameLocked(call: Call): String {
+        val rawHandle = call.details?.handle?.schemeSpecificPart.orEmpty()
+        if (CallerContactResolver.isUsableNumber(rawHandle)) {
+            val cached = getCachedCallerLocked(rawHandle)?.displayName.orEmpty()
+            if (cached.isNotBlank()) return cached
+        }
+        val telecomName = resolveTelecomDisplayName(call)
+        if (telecomName.isNotBlank()) return telecomName
+        return rawHandle
     }
 
     @Suppress("DEPRECATION")
@@ -377,6 +428,7 @@ object ActiveTelecomCallBus {
     private fun emitSnapshotLocked() {
         val primary = findPrimaryCallLocked()
         if (primary == null) {
+            resolvedCallerByHandle.clear()
             _systemCall.value = null
             return
         }
@@ -384,13 +436,26 @@ object ActiveTelecomCallBus {
         val secondary = findSecondaryCallLocked(primary)
         val isConf = isConferenceCall(primary)
         val rawHandle = primary.details?.handle?.schemeSpecificPart.orEmpty()
+        val cachedPrimary = if (!isConf && CallerContactResolver.isUsableNumber(rawHandle)) {
+            getCachedCallerLocked(rawHandle)
+        } else {
+            null
+        }
+        val primaryCallerDisplayName = if (isConf) {
+            "Conference Call"
+        } else {
+            cachedPrimary?.displayName?.ifBlank { resolveTelecomDisplayName(primary) }
+                ?: resolveTelecomDisplayName(primary)
+        }
+        val primaryCallerPhotoUri = if (isConf) "" else cachedPrimary?.photoUri.orEmpty()
+
         val participants = if (isConf) {
             primary.children.map { child ->
                 val childHandle = child.details?.handle?.schemeSpecificPart.orEmpty().ifBlank { "Participant" }
                 ConferenceParticipantSnapshot(
                     callId = callIdentity(child),
                     handle = childHandle,
-                    displayName = resolveDisplayName(child).ifBlank { childHandle },
+                    displayName = resolveDisplayNameLocked(child).ifBlank { childHandle },
                     canSeparate = child.details?.can(Call.Details.CAPABILITY_SEPARATE_FROM_CONFERENCE) == true,
                     canDisconnect = child.details?.can(Call.Details.CAPABILITY_DISCONNECT_FROM_CONFERENCE) != false
                 )
@@ -411,7 +476,7 @@ object ActiveTelecomCallBus {
                 displayName = if (isConferenceCall(sec)) {
                     "Conference (${sec.children.size.coerceAtLeast(2)})"
                 } else {
-                    resolveDisplayName(sec).ifBlank { secHandle }
+                    resolveDisplayNameLocked(sec).ifBlank { secHandle }
                 },
                 isHolding = secState == Call.STATE_HOLDING,
                 isRinging = secState == Call.STATE_RINGING,
@@ -459,6 +524,8 @@ object ActiveTelecomCallBus {
 
         _systemCall.value = SystemTelecomCallSnapshot(
             handle = effectiveHandle,
+            callerDisplayName = primaryCallerDisplayName,
+            callerPhotoUri = primaryCallerPhotoUri,
             state = state,
             isRinging = state == Call.STATE_RINGING,
             isDialing = state == Call.STATE_DIALING || state == Call.STATE_CONNECTING,
@@ -500,6 +567,9 @@ class VoxLineInCallService : InCallService() {
         override fun onDetailsChanged(call: Call, details: Call.Details) {
             if (call in autoRejectedCalls) return
             ActiveTelecomCallBus.updateCall(call)
+            @Suppress("DEPRECATION")
+            syncCallDisplayNotification(call, call.state)
+            resolveAndRefreshCallerInfo(call)
         }
 
         override fun onChildrenChanged(call: Call, children: MutableList<Call>) {
@@ -507,6 +577,7 @@ class VoxLineInCallService : InCallService() {
             ActiveTelecomCallBus.updateCall(call)
             @Suppress("DEPRECATION")
             syncCallDisplayNotification(call, call.state)
+            children.forEach { child -> resolveAndRefreshCallerInfo(child) }
         }
 
         override fun onConferenceableCallsChanged(call: Call, conferenceableCalls: MutableList<Call>) {
@@ -534,21 +605,32 @@ class VoxLineInCallService : InCallService() {
 
         if (!isIncomingRinging) {
             attachAndDisplayCall(call, initialState)
+            resolveAndRefreshCallerInfo(call)
             return
         }
 
         val incomingNumber = call.details?.handle?.schemeSpecificPart.orEmpty()
-        val callerName = resolveCallerName(call)
+        val fallbackCallerName = resolveCallerName(call)
 
         serviceScope.launch {
-            val matchedRule = withContext(Dispatchers.IO) {
-                runCatching {
+            val (matchedRule, resolvedCaller) = withContext(Dispatchers.IO) {
+                val rule = runCatching {
                     val rules = VoxLineDatabase.getInstance(applicationContext)
                         .spamRuleDao()
                         .getAllSnapshot()
                     SpamAnalyzer.findBlockingRule(incomingNumber, rules)
                 }.getOrNull()
+                val contact = runCatching {
+                    CallerContactResolver.resolve(applicationContext, incomingNumber)
+                }.getOrNull()
+                rule to contact
             }
+
+            if (resolvedCaller != null && resolvedCaller.displayName.isNotBlank()) {
+                ActiveTelecomCallBus.cacheResolvedCaller(incomingNumber, resolvedCaller)
+            }
+            val effectiveCallerName = resolvedCaller?.displayName?.ifBlank { fallbackCallerName }
+                ?: fallbackCallerName
 
             if (matchedRule != null) {
                 autoRejectedCalls.add(call)
@@ -560,7 +642,7 @@ class VoxLineInCallService : InCallService() {
                         db.callHistoryDao().insert(
                             CallLogEntity(
                                 phoneNumber = incomingNumber.ifBlank { matchedRule.pattern },
-                                displayName = callerName,
+                                displayName = effectiveCallerName,
                                 callType = CallType.SIM,
                                 direction = CallDirection.BLOCKED,
                                 timestamp = System.currentTimeMillis(),
@@ -578,6 +660,23 @@ class VoxLineInCallService : InCallService() {
             val currentState = call.state
             if (currentState != Call.STATE_DISCONNECTED && currentState != Call.STATE_DISCONNECTING) {
                 attachAndDisplayCall(call, currentState)
+            }
+        }
+    }
+
+    private fun resolveAndRefreshCallerInfo(call: Call) {
+        val number = call.details?.handle?.schemeSpecificPart.orEmpty()
+        if (!CallerContactResolver.isUsableNumber(number)) return
+        if (ActiveTelecomCallBus.getCachedCaller(number)?.displayName?.isNotBlank() == true) return
+
+        serviceScope.launch {
+            val resolved = CallerContactResolver.resolve(applicationContext, number) ?: return@launch
+            if (resolved.displayName.isBlank()) return@launch
+            ActiveTelecomCallBus.cacheResolvedCaller(number, resolved)
+            @Suppress("DEPRECATION")
+            val currentState = call.state
+            if (currentState != Call.STATE_DISCONNECTED && currentState != Call.STATE_DISCONNECTING) {
+                syncCallDisplayNotification(call, currentState)
             }
         }
     }
@@ -696,7 +795,7 @@ class VoxLineInCallService : InCallService() {
             IncomingCallNotificationManager.showOngoingCall(
                 context = this,
                 phoneNumber = remaining.handle,
-                callerName = remaining.handle,
+                callerName = remaining.callerDisplayName.ifBlank { remaining.handle },
                 isHolding = remaining.isHolding
             )
         }
@@ -749,14 +848,23 @@ class VoxLineInCallService : InCallService() {
     }
 
     private fun resolveCallerName(call: Call): String {
+        val rawHandle = call.details?.handle?.schemeSpecificPart.orEmpty()
+        if (CallerContactResolver.isUsableNumber(rawHandle)) {
+            val cached = ActiveTelecomCallBus.getCachedCaller(rawHandle)?.displayName.orEmpty()
+            if (cached.isNotBlank()) return cached
+        }
         val contactName = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            call.details?.contactDisplayName.orEmpty()
+            call.details?.contactDisplayName?.trim().orEmpty()
         } else {
             ""
         }
-        if (contactName.isNotBlank()) return contactName
-        val display = call.details?.callerDisplayName.orEmpty()
-        if (display.isNotBlank()) return display
-        return call.details?.handle?.schemeSpecificPart.orEmpty()
+        if (contactName.isNotBlank() && !CallerContactResolver.isLikelyPhoneNumber(contactName, rawHandle)) {
+            return contactName
+        }
+        val display = call.details?.callerDisplayName?.trim().orEmpty()
+        if (display.isNotBlank() && !CallerContactResolver.isLikelyPhoneNumber(display, rawHandle)) {
+            return display
+        }
+        return rawHandle
     }
 }

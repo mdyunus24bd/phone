@@ -286,14 +286,10 @@ class VoxLineViewModel(application: Application) : AndroidViewModel(application)
                 if (sysCall != null) {
                     val existing = _activeCall.value
                     val resolvedParticipants = sysCall.conferenceParticipants.map { participant ->
-                        val pDigits = participant.handle.filter { it.isDigit() }
-                        val pContact = contacts.value.firstOrNull { c ->
-                            val cd = c.phoneNumber.filter { it.isDigit() }
-                            cd.isNotEmpty() && pDigits.isNotEmpty() && (
-                                cd == pDigits ||
-                                    (cd.length >= 10 && pDigits.length >= 10 && cd.takeLast(10) == pDigits.takeLast(10))
-                                )
-                        }
+                        val pContact = com.example.telecom.CallerContactResolver.findMatchingContact(
+                            participant.handle,
+                            contacts.value
+                        )
                         if (pContact != null) {
                             participant.copy(displayName = pContact.displayName)
                         } else {
@@ -304,14 +300,10 @@ class VoxLineViewModel(application: Application) : AndroidViewModel(application)
                         if (sec.isConference) {
                             sec
                         } else {
-                            val sDigits = sec.handle.filter { it.isDigit() }
-                            val sContact = contacts.value.firstOrNull { c ->
-                                val cd = c.phoneNumber.filter { it.isDigit() }
-                                cd.isNotEmpty() && sDigits.isNotEmpty() && (
-                                    cd == sDigits ||
-                                        (cd.length >= 10 && sDigits.length >= 10 && cd.takeLast(10) == sDigits.takeLast(10))
-                                    )
-                            }
+                            val sContact = com.example.telecom.CallerContactResolver.findMatchingContact(
+                                sec.handle,
+                                contacts.value
+                            )
                             if (sContact != null) sec.copy(displayName = sContact.displayName) else sec
                         }
                     }
@@ -329,7 +321,19 @@ class VoxLineViewModel(application: Application) : AndroidViewModel(application)
                     val matched = if (sysCall.isConference) null else repository.findContactByAddress(sysCall.handle)
                     val resolvedDisplayName = when {
                         sysCall.isConference -> "Conference Call"
-                        else -> matched?.displayName.orEmpty()
+                        !matched?.displayName.isNullOrBlank() -> matched!!.displayName
+                        sysCall.callerDisplayName.isNotBlank() &&
+                            !com.example.telecom.CallerContactResolver.isLikelyPhoneNumber(
+                                sysCall.callerDisplayName,
+                                sysCall.handle
+                            ) -> sysCall.callerDisplayName
+                        else -> ""
+                    }
+                    val resolvedPhotoUri = when {
+                        sysCall.isConference -> ""
+                        !matched?.photoUri.isNullOrBlank() -> matched!!.photoUri
+                        sysCall.callerPhotoUri.isNotBlank() -> sysCall.callerPhotoUri
+                        else -> ""
                     }
 
                     val resolvedSimRoute = telecomBridge.resolveSimLabel(
@@ -356,7 +360,7 @@ class VoxLineViewModel(application: Application) : AndroidViewModel(application)
                             encryptedTransport = false,
                             spamAssessment = null,
                             cannedQuickReplies = sysCall.cannedTextResponses,
-                            photoUri = matched?.photoUri.orEmpty(),
+                            photoUri = resolvedPhotoUri,
                             isConference = sysCall.isConference,
                             conferenceParticipants = resolvedParticipants,
                             secondaryCall = resolvedSecondary,
@@ -378,13 +382,22 @@ class VoxLineViewModel(application: Application) : AndroidViewModel(application)
                         _activeCall.update { cur ->
                             cur?.copy(
                                 address = sysCall.handle,
-                                displayName = if (primaryChanged) resolvedDisplayName else cur.displayName,
+                                displayName = when {
+                                    primaryChanged -> resolvedDisplayName
+                                    cur.displayName.isBlank() && resolvedDisplayName.isNotBlank() -> resolvedDisplayName
+                                    resolvedDisplayName.isNotBlank() && cur.displayName == cur.address -> resolvedDisplayName
+                                    else -> cur.displayName
+                                },
                                 routeLabel = if (sysCall.phoneAccountId.isNotBlank() || sysCall.phoneAccountLabel.isNotBlank()) {
                                     resolvedSimRoute
                                 } else {
                                     cur.routeLabel
                                 },
-                                photoUri = if (primaryChanged) matched?.photoUri.orEmpty() else cur.photoUri,
+                                photoUri = when {
+                                    primaryChanged -> resolvedPhotoUri
+                                    cur.photoUri.isBlank() && resolvedPhotoUri.isNotBlank() -> resolvedPhotoUri
+                                    else -> cur.photoUri
+                                },
                                 isRinging = sysCall.isRinging,
                                 isOnHold = sysCall.isHolding,
                                 statusLabel = liveStatus,
@@ -666,6 +679,7 @@ class VoxLineViewModel(application: Application) : AndroidViewModel(application)
             )
             if (started.isSuccess) {
                 val sourceLabel = started.getOrDefault("VOICE_RECOG")
+                val silenced = callRecordingManager.isAudioSilenced.value
                 _activeCall.update {
                     it?.copy(
                         isRecording = true,
@@ -673,7 +687,7 @@ class VoxLineViewModel(application: Application) : AndroidViewModel(application)
                         isRecordingBusy = false,
                         recordingAudioSource = sourceLabel,
                         recordingSec = 0L,
-                        isRecordingSilenced = callRecordingManager.isAudioSilenced.value
+                        isRecordingSilenced = silenced
                     )
                 }
                 val modeLabel = if (settings.value.autoRecordMode == AutoRecordMode.SPECIFIC_NUMBERS) {
@@ -681,7 +695,13 @@ class VoxLineViewModel(application: Application) : AndroidViewModel(application)
                 } else {
                     "Auto-Record"
                 }
-                showMessage("$modeLabel active • Recording in background to App Internal Storage.")
+                showMessage(
+                    if (silenced) {
+                        "$modeLabel started, but Android is blocking third-party call audio on this device."
+                    } else {
+                        "$modeLabel active • Recording in background to App Internal Storage."
+                    }
+                )
             } else {
                 _activeCall.update { it?.copy(isRecordingBusy = false) }
                 showMessage("Auto-record unavailable: ${started.exceptionOrNull()?.localizedMessage ?: "Audio busy"}")
@@ -817,6 +837,15 @@ class VoxLineViewModel(application: Application) : AndroidViewModel(application)
             runCatching { audio?.isSpeakerphoneOn = nextSpeaker }
         }
         _activeCall.update { it?.copy(isSpeakerOn = nextSpeaker) }
+        if (nextSpeaker && current.isRecording && current.isRecordingSilenced && !current.isRecordingBusy) {
+            viewModelScope.launch {
+                delay(350L)
+                val latest = _activeCall.value
+                if (latest != null && latest.isRecording && latest.isRecordingSilenced && !latest.isRecordingBusy) {
+                    retryCallRecording()
+                }
+            }
+        }
     }
 
     fun toggleHold() {
@@ -911,6 +940,7 @@ class VoxLineViewModel(application: Application) : AndroidViewModel(application)
                 )
                 if (result.isSuccess) {
                     val sourceLabel = result.getOrDefault("VOICE_RECOG")
+                    val silenced = callRecordingManager.isAudioSilenced.value
                     _activeCall.update {
                         it?.copy(
                             isRecording = true,
@@ -918,10 +948,16 @@ class VoxLineViewModel(application: Application) : AndroidViewModel(application)
                             isRecordingBusy = false,
                             recordingAudioSource = sourceLabel,
                             recordingSec = 0L,
-                            isRecordingSilenced = callRecordingManager.isAudioSilenced.value
+                            isRecordingSilenced = silenced
                         )
                     }
-                    showMessage("Call recording started • Saving to App Internal Storage.")
+                    showMessage(
+                        if (silenced) {
+                            "Recording started, but Android is blocking third-party call audio on this device."
+                        } else {
+                            "Call recording started • Saving to App Internal Storage."
+                        }
+                    )
                 } else {
                     _activeCall.update { it?.copy(isRecordingBusy = false) }
                     showMessage("Recording unavailable: ${result.exceptionOrNull()?.localizedMessage ?: "Audio busy"}")
@@ -961,7 +997,13 @@ class VoxLineViewModel(application: Application) : AndroidViewModel(application)
                             finishedRecordingId = recId
                         )
                     }
-                    showMessage("Saved to App Internal Storage (${rec.durationSec}s): ${rec.fileName}")
+                    showMessage(
+                        if (rec.audioSilencedAllCall) {
+                            "Saved (${rec.durationSec}s), but Android blocked call audio on this phone (silent file)."
+                        } else {
+                            "Saved to App Internal Storage (${rec.durationSec}s): ${rec.fileName}"
+                        }
+                    )
                 } else {
                     _activeCall.update {
                         it?.copy(
@@ -980,8 +1022,8 @@ class VoxLineViewModel(application: Application) : AndroidViewModel(application)
     }
 
     /**
-     * Re-probes Android audio sources during an active call (e.g., after enabling
-     * VoxLine Call Audio Helper or switching speakerphone) to capture non-silenced audio.
+     * Re-probes Android audio sources during an active call (e.g., after switching
+     * speakerphone or audio route) to capture non-silenced audio when permitted by the device.
      */
     fun retryCallRecording() {
         val current = _activeCall.value ?: return
@@ -998,16 +1040,23 @@ class VoxLineViewModel(application: Application) : AndroidViewModel(application)
             )
             if (result.isSuccess) {
                 val sourceLabel = result.getOrDefault("VOICE_RECOG")
+                val silenced = callRecordingManager.isAudioSilenced.value
                 _activeCall.update {
                     it?.copy(
                         isRecording = true,
                         isRecordingBusy = false,
                         recordingAudioSource = sourceLabel,
                         recordingSec = 0L,
-                        isRecordingSilenced = callRecordingManager.isAudioSilenced.value
+                        isRecordingSilenced = silenced
                     )
                 }
-                showMessage("Re-started call capture on $sourceLabel.")
+                showMessage(
+                    if (silenced) {
+                        "Android OS is still silencing third-party call audio on this device."
+                    } else {
+                        "Call audio capture active on $sourceLabel."
+                    }
+                )
             } else {
                 _activeCall.update {
                     it?.copy(
@@ -1058,7 +1107,13 @@ class VoxLineViewModel(application: Application) : AndroidViewModel(application)
                             encryptedAtRest = rec.encryptedAtRest
                         )
                     )
-                    showMessage("Recording saved to App Internal Storage (${rec.durationSec}s).")
+                    showMessage(
+                        if (rec.audioSilencedAllCall) {
+                            "Recording saved (${rec.durationSec}s), but Android blocked call audio on this phone (silent file)."
+                        } else {
+                            "Recording saved to App Internal Storage (${rec.durationSec}s)."
+                        }
+                    )
                 }
             }
 

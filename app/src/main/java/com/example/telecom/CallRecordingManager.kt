@@ -7,6 +7,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.media.AudioAttributes
+import android.media.AudioDeviceInfo
 import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioRecord
@@ -41,7 +42,8 @@ data class FinishedRecording(
     val storagePath: String,
     val durationSec: Long,
     val fileSizeBytes: Long,
-    val encryptedAtRest: Boolean
+    val encryptedAtRest: Boolean,
+    val audioSilencedAllCall: Boolean = false
 )
 
 sealed class CallRecordingState {
@@ -73,7 +75,8 @@ private data class OpenedCaptureSession(
     val bufferSizeShorts: Int,
     val preCapturedChunks: List<ShortArray>,
     val isSilenced: Boolean,
-    val hasNonZeroSignal: Boolean
+    val hasNonZeroSignal: Boolean,
+    val recordingCallback: AudioManager.AudioRecordingCallback? = null
 )
 
 /**
@@ -89,6 +92,7 @@ class CallRecordingManager(
     private val recorderMutex = Mutex()
     private val captureRunning = AtomicBoolean(false)
     private val discardOnStop = AtomicBoolean(false)
+    private val capturedNonZeroAudio = AtomicBoolean(false)
     private val callbackExecutor = Executors.newSingleThreadExecutor()
 
     @Volatile
@@ -162,6 +166,7 @@ class CallRecordingManager(
         _recordingState.value = CallRecordingState.Starting
         _liveAudioLevel.value = 0f
         _isAudioSilenced.value = false
+        capturedNonZeroAudio.set(false)
 
         withContext(Dispatchers.IO) {
             stopCaptureResourcesLocked(discardActiveFile = true)
@@ -201,13 +206,15 @@ class CallRecordingManager(
             }
 
             activeAudioRecord = session.audioRecord
+            activeRecordingCallback = session.recordingCallback
             activeWriter = writer
             activeCaptureFile = writer.outputFile
             activeFileExtension = writer.fileExtension
             startedAtMs = System.currentTimeMillis()
             _isAudioSilenced.value = session.isSilenced
-
-            registerLiveSilencedMonitor(session.audioRecord)
+            if (session.hasNonZeroSignal) {
+                capturedNonZeroAudio.set(true)
+            }
 
             // Adaptive gain boosts quiet far-end earpiece/speaker pickup on mic/voice-recog sources
             val gainProcessor = AdaptiveCallVoiceGain(
@@ -249,16 +256,17 @@ class CallRecordingManager(
     /**
      * Tests candidate Android audio sources in priority order using non-blocking short probes.
      * Immediately selects the first source that is NOT silenced by Android AudioPolicyService
-     * and delivers real non-zero PCM audio.
+     * and delivers real non-zero PCM audio. If all probes are quiet during the brief window,
+     * always prefers an unsilenced source over a silenced source.
      */
     @SuppressLint("MissingPermission")
     private fun probeAndOpenBestAudioSource(): OpenedCaptureSession? {
         val candidates = buildCandidateSources()
 
-        var bestFallbackSpec: Triple<Int, String, Int>? = null
-        var bestFallbackPriority = Int.MAX_VALUE
+        var bestUnsilencedFallback: Triple<Int, String, Int>? = null
+        var bestSilencedFallback: Triple<Int, String, Int>? = null
 
-        for ((index, candidate) in candidates.withIndex()) {
+        for (candidate in candidates) {
             for (rate in candidate.preferredRates) {
                 val probed = tryProbeAudioSource(
                     source = candidate.source,
@@ -266,27 +274,26 @@ class CallRecordingManager(
                     sampleRate = rate
                 ) ?: continue
 
-                // Record the highest-priority source that initialized cleanly as a fallback
-                if (index < bestFallbackPriority) {
-                    bestFallbackPriority = index
-                    bestFallbackSpec = Triple(candidate.source, candidate.label, rate)
-                }
-
                 // If Android did NOT silence this source AND we got real non-zero PCM, lock onto it!
                 if (!probed.isSilenced && probed.hasNonZeroSignal) {
                     return probed
                 }
 
-                // Otherwise close the probe and try the next candidate source
-                releaseAudioRecordSafe(probed.audioRecord)
-                break // No need to test lower sample rates for the same silenced source
+                // Always prefer an unsilenced source over a silenced source for fallback
+                if (!probed.isSilenced) {
+                    if (bestUnsilencedFallback == null) {
+                        bestUnsilencedFallback = Triple(candidate.source, candidate.label, rate)
+                    }
+                } else if (bestSilencedFallback == null) {
+                    bestSilencedFallback = Triple(candidate.source, candidate.label, rate)
+                }
+
+                releaseProbedSession(probed)
+                break // No need to test lower sample rates for the same source once initialized
             }
         }
 
-        // Fallback: no candidate produced non-zero signal during the brief probe (e.g., quiet room
-        // or OS call-audio restriction). Re-open best fallback (preferring VOICE_RECOGNITION / MIC)
-        // so recording still runs and can auto-recover mid-call (e.g., when Speaker is enabled).
-        val fallback = bestFallbackSpec ?: return null
+        val fallback = bestUnsilencedFallback ?: bestSilencedFallback ?: return null
         return openAudioRecordDirect(
             source = fallback.first,
             label = fallback.second,
@@ -296,7 +303,7 @@ class CallRecordingManager(
 
     private fun buildCandidateSources(): List<AudioSourceCandidate> {
         val list = mutableListOf<AudioSourceCandidate>()
-        // 1. Direct telephony bus (works natively on OEM ROMs that expose it)
+        // 1. Direct telephony bus (works natively on OEM ROMs that expose it without Accessibility)
         list += AudioSourceCandidate(
             source = MediaRecorder.AudioSource.VOICE_CALL,
             label = "VOICE_CALL",
@@ -308,17 +315,19 @@ class CallRecordingManager(
             label = "VOICE_RECOG",
             preferredRates = listOf(16_000, 44_100, 48_000, 8_000)
         )
-        // 3. Raw MIC with setPrivacySensitive(false) often succeeds on OEMs that block VOICE_COMM
+        // 3. Raw MIC with setPrivacySensitive(false) often succeeds on OEMs that allow mic capture
         list += AudioSourceCandidate(
             source = MediaRecorder.AudioSource.MIC,
             label = "MIC",
             preferredRates = listOf(44_100, 16_000, 48_000)
         )
+        // 4. VOICE_COMMUNICATION: VoIP/call mic route permitted by some OEM HALs during active calls
         list += AudioSourceCandidate(
             source = MediaRecorder.AudioSource.VOICE_COMMUNICATION,
             label = "VOICE_COMM",
             preferredRates = listOf(16_000, 44_100, 48_000)
         )
+        // 5. UNPROCESSED: non-privacy-sensitive raw capture path on Android 7+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             list += AudioSourceCandidate(
                 source = MediaRecorder.AudioSource.UNPROCESSED,
@@ -326,16 +335,6 @@ class CallRecordingManager(
                 preferredRates = listOf(44_100, 16_000, 48_000)
             )
         }
-        list += AudioSourceCandidate(
-            source = MediaRecorder.AudioSource.CAMCORDER,
-            label = "CAMCORDER",
-            preferredRates = listOf(44_100, 16_000)
-        )
-        list += AudioSourceCandidate(
-            source = MediaRecorder.AudioSource.DEFAULT,
-            label = "DEFAULT",
-            preferredRates = listOf(44_100, 16_000, 8_000)
-        )
         return list
     }
 
@@ -358,26 +357,50 @@ class CallRecordingManager(
             .setChannelMask(AudioFormat.CHANNEL_IN_MONO)
             .build()
 
-        val builder = AudioRecord.Builder()
-            .setAudioSource(source)
-            .setAudioFormat(format)
-            .setBufferSizeInBytes(bufferBytes)
+        val isTelephonyBusSource = source == MediaRecorder.AudioSource.VOICE_CALL ||
+            source == MediaRecorder.AudioSource.VOICE_UPLINK ||
+            source == MediaRecorder.AudioSource.VOICE_DOWNLINK
 
-        // Android 11+: opt out of privacy-sensitive exclusivity so Android does not auto-silence
-        // this stream during concurrent active calls
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            runCatching { builder.setPrivacySensitive(false) }
+        fun buildRecord(optOutPrivacySensitive: Boolean): AudioRecord? {
+            val builder = AudioRecord.Builder()
+                .setAudioSource(source)
+                .setAudioFormat(format)
+                .setBufferSizeInBytes(bufferBytes)
+
+            // Android 11+: opt out of privacy-sensitive exclusivity on mic sources so we do not
+            // mark ourselves exclusive or get auto-silenced unnecessarily. Avoid setting this
+            // flag on VOICE_CALL where OEM HALs can reject it.
+            if (optOutPrivacySensitive && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                runCatching { builder.setPrivacySensitive(false) }
+            }
+
+            val rec = try {
+                builder.build()
+            } catch (_: Throwable) {
+                return null
+            }
+
+            if (rec.state != AudioRecord.STATE_INITIALIZED) {
+                releaseAudioRecordSafe(rec)
+                return null
+            }
+            return rec
         }
 
-        val record = try {
-            builder.build()
-        } catch (_: Throwable) {
-            return null
-        }
+        val record = buildRecord(optOutPrivacySensitive = !isTelephonyBusSource)
+            ?: (if (!isTelephonyBusSource) buildRecord(optOutPrivacySensitive = false) else null)
+            ?: return null
 
-        if (record.state != AudioRecord.STATE_INITIALIZED) {
-            releaseAudioRecordSafe(record)
-            return null
+        // Hint telephony input device on VOICE_CALL when OEM exposes TYPE_TELEPHONY
+        if (isTelephonyBusSource && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            runCatching {
+                val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+                val telephonyIn = audioManager?.getDevices(AudioManager.GET_DEVICES_INPUTS)
+                    ?.firstOrNull { it.type == AudioDeviceInfo.TYPE_TELEPHONY }
+                if (telephonyIn != null) {
+                    record.preferredDevice = telephonyIn
+                }
+            }
         }
 
         val readChunkShorts = (sampleRate / 25).coerceIn(320, 2048) // ~40ms frames
@@ -390,9 +413,11 @@ class CallRecordingManager(
         sampleRate: Int
     ): OpenedCaptureSession? {
         val (record, chunkShorts) = createConfiguredAudioRecord(source, sampleRate) ?: return null
+        val callback = createAndRegisterSilencedMonitor(record)
         return try {
             record.startRecording()
             if (record.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
+                unregisterCallbackSafe(record, callback)
                 releaseAudioRecordSafe(record)
                 return null
             }
@@ -401,7 +426,7 @@ class CallRecordingManager(
             val tempBuf = ShortArray(chunkShorts)
             var peakAmplitude = 0
             var silencedByApi = false
-            val deadlineMs = System.currentTimeMillis() + 260L
+            val deadlineMs = System.currentTimeMillis() + 360L
 
             while (System.currentTimeMillis() < deadlineMs) {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -423,6 +448,7 @@ class CallRecordingManager(
                         break
                     }
                 } else if (read < 0) {
+                    unregisterCallbackSafe(record, callback)
                     releaseAudioRecordSafe(record)
                     return null
                 } else {
@@ -442,9 +468,11 @@ class CallRecordingManager(
                 bufferSizeShorts = chunkShorts,
                 preCapturedChunks = probeChunks,
                 isSilenced = silencedByApi,
-                hasNonZeroSignal = peakAmplitude > 0
+                hasNonZeroSignal = peakAmplitude > 0,
+                recordingCallback = callback
             )
         } catch (_: Throwable) {
+            unregisterCallbackSafe(record, callback)
             releaseAudioRecordSafe(record)
             null
         }
@@ -456,9 +484,11 @@ class CallRecordingManager(
         sampleRate: Int
     ): OpenedCaptureSession? {
         val (record, chunkShorts) = createConfiguredAudioRecord(source, sampleRate) ?: return null
+        val callback = createAndRegisterSilencedMonitor(record)
         return try {
             record.startRecording()
             if (record.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
+                unregisterCallbackSafe(record, callback)
                 releaseAudioRecordSafe(record)
                 return null
             }
@@ -475,27 +505,48 @@ class CallRecordingManager(
                 bufferSizeShorts = chunkShorts,
                 preCapturedChunks = emptyList(),
                 isSilenced = silenced,
-                hasNonZeroSignal = false
+                hasNonZeroSignal = false,
+                recordingCallback = callback
             )
         } catch (_: Throwable) {
+            unregisterCallbackSafe(record, callback)
             releaseAudioRecordSafe(record)
             null
         }
     }
 
-    private fun registerLiveSilencedMonitor(audioRecord: AudioRecord) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return
+    /**
+     * Registers [AudioManager.AudioRecordingCallback] BEFORE calling [AudioRecord.startRecording],
+     * as required by Android's AudioRecord specification so live silenced/unsilenced transitions
+     * are delivered reliably.
+     */
+    private fun createAndRegisterSilencedMonitor(audioRecord: AudioRecord): AudioManager.AudioRecordingCallback? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return null
         val sessionId = audioRecord.audioSessionId
         val callback = object : AudioManager.AudioRecordingCallback() {
             override fun onRecordingConfigChanged(configs: MutableList<AudioRecordingConfiguration>?) {
+                if (activeAudioRecord !== audioRecord) return
                 val mine = configs?.firstOrNull { it.clientAudioSessionId == sessionId } ?: return
                 updateSilencedFlag(mine.isClientSilenced)
             }
         }
-        activeRecordingCallback = callback
-        runCatching {
+        return runCatching {
             audioRecord.registerAudioRecordingCallback(callbackExecutor, callback)
-        }
+            callback
+        }.getOrNull()
+    }
+
+    private fun releaseProbedSession(session: OpenedCaptureSession) {
+        unregisterCallbackSafe(session.audioRecord, session.recordingCallback)
+        releaseAudioRecordSafe(session.audioRecord)
+    }
+
+    private fun unregisterCallbackSafe(
+        record: AudioRecord,
+        callback: AudioManager.AudioRecordingCallback?
+    ) {
+        if (callback == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return
+        runCatching { record.unregisterAudioRecordingCallback(callback) }
     }
 
     private fun updateSilencedFlag(silenced: Boolean) {
@@ -563,6 +614,7 @@ class CallRecordingManager(
                         updateSilencedFlag(true)
                     }
                 } else {
+                    capturedNonZeroAudio.set(true)
                     consecutiveZeroSamples = 0L
                     if (!isApiSilenced) {
                         updateSilencedFlag(false)
@@ -617,6 +669,7 @@ class CallRecordingManager(
 
             _recordingState.value = CallRecordingState.Saving
             val durationSec = ((System.currentTimeMillis() - startedAtMs) / 1000L).coerceAtLeast(1L)
+            val silencedAllCall = !capturedNonZeroAudio.get()
             stopCaptureResourcesLocked(discardActiveFile = false)
             CallRecordingForegroundService.stop(context)
 
@@ -659,7 +712,8 @@ class CallRecordingManager(
                         storagePath = "Internal Storage/$INTERNAL_RECORDINGS_DIR/$fileName",
                         durationSec = durationSec,
                         fileSizeBytes = savedSize,
-                        encryptedAtRest = false
+                        encryptedAtRest = false,
+                        audioSilencedAllCall = silencedAllCall
                     )
                 )
             } catch (e: Exception) {
